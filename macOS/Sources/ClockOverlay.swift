@@ -28,6 +28,13 @@ final class ClockOverlay: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        let scale = bounds.width / 156
+        guard scale > 0 else { return }
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        let transform = AffineTransform(scaleByX: scale, byY: scale)
+        (transform as NSAffineTransform).concat()
+        let bounds = CGRect(x: 0, y: 0, width: 156, height: 84)
         NSColor.black.withAlphaComponent(0.82).setFill()
         NSBezierPath(roundedRect: bounds, xRadius: 14, yRadius: 14).fill()
         let now = Date()

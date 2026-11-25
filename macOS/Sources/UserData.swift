@@ -8,6 +8,39 @@ struct PlaybackPreferences: Codable, Equatable, Sendable {
     static let presets = [3, 5, 10, 15, 30, 60]
     var seconds = 5
     var fromBeginning = false
+    var barHideSeconds = 3
+    var noticeSide: ClockSide = .right
+    var clockPlacement = OverlayPlacement()
+    var heartPlacement = OverlayPlacement()
+    var barPlacement = OverlayPlacement()
+
+    func placement(_ item: OverlayItem) -> OverlayPlacement {
+        switch item {
+        case .clock: clockPlacement
+        case .heart: heartPlacement
+        case .bar: barPlacement
+        }
+    }
+
+    mutating func setPlacement(_ value: OverlayPlacement, for item: OverlayItem) {
+        switch item {
+        case .clock: clockPlacement = value
+        case .heart: heartPlacement = value
+        case .bar: barPlacement = value
+        }
+    }
+
+    mutating func resetPosition(_ item: OverlayItem) {
+        var value = placement(item)
+        value.position = nil
+        setPlacement(value, for: item)
+        switch item {
+        case .clock: clockSide = .right
+        case .heart: noticeSide = .right
+        case .bar: barEdge = .bottom
+        }
+    }
+
     var reserveBarSpace = false
     var barEdge: Edge = .bottom
     var clockVisible = false
@@ -23,6 +56,11 @@ struct PlaybackPreferences: Codable, Equatable, Sendable {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         seconds = try values.decodeIfPresent(Int.self, forKey: .seconds) ?? 5
         fromBeginning = try values.decodeIfPresent(Bool.self, forKey: .fromBeginning) ?? false
+        barHideSeconds = try values.decodeIfPresent(Int.self, forKey: .barHideSeconds) ?? 3
+        noticeSide = try values.decodeIfPresent(ClockSide.self, forKey: .noticeSide) ?? .right
+        clockPlacement = try values.decodeIfPresent(OverlayPlacement.self, forKey: .clockPlacement) ?? OverlayPlacement()
+        heartPlacement = try values.decodeIfPresent(OverlayPlacement.self, forKey: .heartPlacement) ?? OverlayPlacement()
+        barPlacement = try values.decodeIfPresent(OverlayPlacement.self, forKey: .barPlacement) ?? OverlayPlacement()
         reserveBarSpace = try values.decodeIfPresent(Bool.self, forKey: .reserveBarSpace) ?? false
         barEdge = try values.decodeIfPresent(Edge.self, forKey: .barEdge) ?? .bottom
         clockVisible = try values.decodeIfPresent(Bool.self, forKey: .clockVisible) ?? false

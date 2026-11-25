@@ -2,38 +2,78 @@ namespace PhotoSlideshow;
 
 internal sealed class SettingsDialog : Form
 {
-    private readonly NumericUpDown seconds = new() { Minimum = 1, Maximum = 300, Width = 70 };
+    private readonly TextBox seconds = new() { MaxLength = 4, Width = 70 };
     private readonly ComboBox start = Choice("前回の続き", "先頭から");
     private readonly ComboBox area = Choice("画面全体", "操作バー分の余白を確保");
-    private readonly ComboBox edge = Choice("上", "下");
+    private readonly ComboBox edge = Choice("上", "下", "カスタム");
     private readonly CheckBox clock = new() { Text = "表示する", AutoSize = true };
     private readonly ComboBox style = Choice("アナログ", "デジタル");
-    private readonly ComboBox side = Choice("左上", "右上");
-    public bool ChangeFolder { get; private set; }
-    public Options Value => new()
+    private readonly ComboBox side = Choice("左上", "右上", "カスタム");
+    private readonly TextBox delay = new() { Width = 70, MaxLength = 3 };
+    private readonly ComboBox notice = Choice("左上", "右上", "カスタム");
+    private readonly Label error = new() { AutoSize = true, ForeColor = Color.LightCoral };
+    public string? FolderPath { get; private set; }
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public Action<Options>? Preview { get; set; }
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public Func<Options, bool>? Persist { get; set; }
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    internal Action<SettingsDialog>? EditLayout { get; set; }
+    private Options draft;
+    private bool updatingLayout;
+    public Options Value => draft with
     {
-        Seconds = (int)seconds.Value, FromBeginning = start.SelectedIndex == 1,
-        ReserveBarSpace = area.SelectedIndex == 1, BarAtTop = edge.SelectedIndex == 0,
-        ClockVisible = clock.Checked, AnalogClock = style.SelectedIndex == 0, ClockAtLeft = side.SelectedIndex == 0
+        Seconds = int.TryParse(seconds.Text, out int duration) ? duration : 5, BarHideSeconds = int.TryParse(delay.Text, out int parsed) ? parsed : 3,
+        NoticeAtLeft = notice.SelectedIndex == 2 ? draft.NoticeAtLeft : notice.SelectedIndex == 0,
+        HeartPlacement = draft.HeartPlacement with { UsePresetPosition = notice.SelectedIndex != 2 },
+        FromBeginning = start.SelectedIndex == 1, ReserveBarSpace = area.SelectedIndex == 1,
+        BarAtTop = edge.SelectedIndex == 2 ? draft.BarAtTop : edge.SelectedIndex == 0,
+        BarPlacement = draft.BarPlacement with { UsePresetPosition = edge.SelectedIndex != 2 },
+        ClockVisible = clock.Checked, AnalogClock = style.SelectedIndex == 0,
+        ClockAtLeft = side.SelectedIndex == 2 ? draft.ClockAtLeft : side.SelectedIndex == 0,
+        ClockPlacement = draft.ClockPlacement with { UsePresetPosition = side.SelectedIndex != 2 }
     };
+
+    internal void UpdateLayout(Options value)
+    {
+        draft = value;
+        updatingLayout = true;
+        SetChoice(edge, value.BarPlacement, value.BarAtTop);
+        SetChoice(side, value.ClockPlacement, value.ClockAtLeft);
+        SetChoice(notice, value.HeartPlacement, value.NoticeAtLeft);
+        updatingLayout = false;
+        Preview?.Invoke(Value);
+    }
+
+    private static void SetChoice(ComboBox control, OverlayPlacement placement, bool first)
+    {
+        if (placement.Position is null && control.Items.Count == 3) control.Items.RemoveAt(2);
+        if (placement.Position is not null && control.Items.Count == 2) control.Items.Add("カスタム");
+        control.SelectedIndex = placement.Custom ? 2 : first ? 0 : 1;
+    }
 
     public SettingsDialog(Options value)
     {
+        draft = value;
         Text = "設定";
         BackColor = Color.FromArgb(27, 28, 31);
         ForeColor = Color.White;
         Font = new Font("Yu Gothic UI", 11);
-        ClientSize = new Size(650, 580);
+        ClientSize = new Size(650, 660);
+        ControlBox = false;
         MinimizeBox = MaximizeBox = false;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.CenterParent;
-        seconds.Value = value.Seconds;
+        seconds.Text = value.Seconds.ToString();
         start.SelectedIndex = value.FromBeginning ? 1 : 0;
         area.SelectedIndex = value.ReserveBarSpace ? 1 : 0;
-        edge.SelectedIndex = value.BarAtTop ? 0 : 1;
         clock.Checked = value.ClockVisible;
         style.SelectedIndex = value.AnalogClock ? 0 : 1;
-        side.SelectedIndex = value.ClockAtLeft ? 0 : 1;
+        delay.Text = value.BarHideSeconds.ToString();
+        UpdateLayout(value);
+        foreach (var choice in new[] { area, edge, style, side, notice })
+            choice.SelectedIndexChanged += (_, _) => { if (!updatingLayout) Preview?.Invoke(Value); };
+        clock.CheckedChanged += (_, _) => Preview?.Invoke(Value);
 
         var table = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, AutoScroll = true, Padding = new Padding(22) };
         table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 198));
@@ -58,7 +98,7 @@ internal sealed class SettingsDialog : Form
         foreach (int preset in new[] {3, 5, 10, 15, 30, 60})
         {
             var button = new Button { Text = $"{preset}秒", AutoSize = true, BackColor = Color.FromArgb(52, 54, 58) };
-            button.Click += (_, _) => seconds.Value = preset;
+            button.Click += (_, _) => seconds.Text = preset.ToString();
             presets.Controls.Add(button);
         }
         Row("", presets);
@@ -70,18 +110,50 @@ internal sealed class SettingsDialog : Form
         Row("時計を表示", clock);
         Row("時計の種類", style);
         Row("時計の位置", side);
+        Section("操作バーと通知");
+        Row("操作バーを隠すまで（秒）", delay);
+        Row("お気に入りの位置", notice);
+        var edit = new Button { Text = "配置を編集", AutoSize = true };
+        edit.Click += (_, _) => EditLayout?.Invoke(this);
+        Row("", edit);
+        table.Controls.Add(error, 0, table.RowCount++);
+        table.SetColumnSpan(error, 2);
         var actions = new FlowLayoutPanel { AutoSize = true };
-        var close = new Button { Text = "閉じる", DialogResult = DialogResult.Cancel, AutoSize = true };
-        var save = new Button { Text = "保存して閉じる", DialogResult = DialogResult.OK, AutoSize = true,
-            BackColor = Color.FromArgb(38, 84, 195) };
+        var close = new Button { Text = "閉じる", AutoSize = true, BackColor = Color.FromArgb(38, 84, 195) };
+        close.Click += (_, _) =>
+        {
+            if (!int.TryParse(delay.Text, out int hide) || hide < 1 || hide > 60)
+            {
+                error.Text = "バーを隠す時間は1〜60秒で入力してください。";
+                return;
+            }
+            if (!int.TryParse(seconds.Text, out int duration) || duration < 1 || duration > 300)
+            {
+                error.Text = "表示秒数は1〜300秒で入力してください。";
+                return;
+            }
+            if (Persist?.Invoke(Value) == false)
+            {
+                error.Text = "設定を保存できませんでした。再試行してください。";
+                return;
+            }
+            DialogResult = DialogResult.OK;
+        };
         var folder = new Button { Text = "画像フォルダを選ぶ", AutoSize = true };
-        folder.Click += (_, _) => { ChangeFolder = true; DialogResult = DialogResult.OK; };
-        actions.Controls.AddRange([folder, close, save]);
+        folder.Click += (_, _) =>
+        {
+            using var chooser = new FolderBrowserDialog { Description = "再生する画像フォルダを選んでください" };
+            if (chooser.ShowDialog(this) == DialogResult.OK)
+            {
+                FolderPath = chooser.SelectedPath;
+                folder.Text = "画像フォルダを選択済み";
+            }
+        };
+        actions.Controls.AddRange([folder, close]);
         table.Controls.Add(actions, 0, table.RowCount++);
         table.SetColumnSpan(actions, 2);
         Controls.Add(table);
-        AcceptButton = save;
-        CancelButton = close;
+        AcceptButton = close;
     }
 
     private static ComboBox Choice(params string[] values)
@@ -94,55 +166,31 @@ internal sealed class SettingsDialog : Form
 
 internal sealed class PhotoListDialog : Form
 {
-    private readonly ListBox list = new() { Dock = DockStyle.Fill, AccessibleName = "写真一覧" };
-    private readonly CheckBox filter = new() { Text = "お気に入りのみ", AutoSize = true };
-    private readonly Button play = new() { Text = "表示", AutoSize = true };
-    private readonly Button remove = new() { Text = "お気に入り解除", AutoSize = true };
-    private sealed record Row(int Index, string Label) { public override string ToString() => Label; }
-    public int Selected => (list.SelectedItem as Row)?.Index ?? -1;
+    private readonly PhotoGrid grid;
+    public int Selected { get; private set; } = -1;
 
     public PhotoListDialog(PhotoFile[] photos, int current, Func<int, bool> favorite, Func<int, bool> delete)
     {
         Text = "写真一覧";
-        ClientSize = new Size(650, 510);
+        ClientSize = new(744, 600);
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.CenterParent;
         MinimizeBox = MaximizeBox = false;
-        var actions = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 40 };
+        grid = new PhotoGrid(photos, current, favorite) { Dock = DockStyle.Fill };
+        var actions = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 40 };
+        var all = new RadioButton { Appearance = Appearance.Button, Text = "すべて", AutoSize = true, Checked = true };
+        var marked = new RadioButton { Appearance = Appearance.Button, Text = "お気に入り", AutoSize = true };
         var close = new Button { Text = "閉じる", DialogResult = DialogResult.Cancel, AutoSize = true };
-        actions.Controls.AddRange([filter, play, remove, close]);
-        Controls.Add(list);
-        Controls.Add(actions);
-        void UpdateActions()
+        marked.CheckedChanged += (_, _) => grid.Filter(marked.Checked, keepOffset: false);
+        grid.OpenPhoto = index => { Selected = index; DialogResult = DialogResult.OK; };
+        grid.RemoveFavorite = index =>
         {
-            play.Enabled = Selected >= 0;
-            remove.Enabled = Selected >= 0 && favorite(Selected);
-        }
-        void Reload(int selected)
-        {
-            list.BeginUpdate();
-            list.Items.Clear();
-            for (int index = 0; index < photos.Length; index++)
-            {
-                bool marked = favorite(index);
-                if (!filter.Checked || marked)
-                {
-                    int row = list.Items.Add(new Row(index, $"{index + 1}　{(marked ? "★　" : "")}{photos[index].ID}"));
-                    if (index == selected) list.SelectedIndex = row;
-                }
-            }
-            list.EndUpdate();
-            UpdateActions();
-        }
-        filter.CheckedChanged += (_, _) => Reload(Selected);
-        list.SelectedIndexChanged += (_, _) => UpdateActions();
-        play.Click += (_, _) => { if (Selected >= 0) DialogResult = DialogResult.OK; };
-        list.DoubleClick += (_, _) =>
-        {
-            if (list.IndexFromPoint(list.PointToClient(Cursor.Position)) >= 0) play.PerformClick();
+            if (delete(index)) grid.Filter(marked.Checked, keepOffset: true);
         };
-        remove.Click += (_, _) => { var index = Selected; if (index >= 0 && delete(index)) Reload(index); };
-        Reload(current);
+        actions.Controls.AddRange([all, marked, close]);
+        Controls.Add(grid);
+        Controls.Add(actions);
+        Shown += (_, _) => grid.ScrollToCurrent();
         CancelButton = close;
     }
 }

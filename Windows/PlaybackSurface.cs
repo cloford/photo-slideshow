@@ -18,11 +18,17 @@ internal sealed class PlaybackSurface : Control
     private PointF offset;
     private long lastEffect = -1;
     private bool removed;
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    internal bool IsFavorite { get; set; }
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    internal bool Editing { get; set; }
     private bool fall;
+    private bool bounce;
+    internal PointF FavoriteOrigin;
     private RectangleF clockRect;
     private RectangleF indicatorRect;
-    private readonly Font digitalFont = new("Segoe UI", 26, FontStyle.Bold);
-    private readonly Font symbol = new("Segoe UI Symbol", 27, FontStyle.Bold);
+    private readonly Font digitalFont = new("Segoe UI", 34, FontStyle.Bold, GraphicsUnit.Pixel);
+    private readonly Font symbol = new("Segoe UI Symbol", 37, FontStyle.Bold, GraphicsUnit.Pixel);
     private string status = "";
 
     public PlaybackSurface()
@@ -43,7 +49,7 @@ internal sealed class PlaybackSurface : Control
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     internal Action<int>? MovePhoto { get; set; }
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    internal Action? Reveal { get; set; }
+    internal Action? ZoomChanged { get; set; }
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     internal Action<int>? FrameDrawn { get; set; }
     public int ImageWidth => image?.Width ?? 0;
@@ -51,12 +57,17 @@ internal sealed class PlaybackSurface : Control
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     internal string Status { set { status = value; Invalidate(); } }
     public bool EffectActive => lastEffect >= 0;
+    internal OverlayFrames Geometry => new(new RectangleF(0, 0, Math.Max(1, Width), Math.Max(1, Height)),
+        Options, DeviceDpi / 96f);
 
-    public void ShowFavoriteEffect(bool removal, bool falling)
+    internal Bitmap? CopyImage() => image is null ? null : new Bitmap(image);
+
+    public void ShowFavoriteEffect(bool removal, bool falling, bool bouncing)
     {
         lastEffect = Stopwatch.GetTimestamp();
         removed = removal;
         fall = falling;
+        bounce = bouncing;
         Invalidate();
     }
 
@@ -65,6 +76,7 @@ internal sealed class PlaybackSurface : Control
         var old = image;
         image = next;
         revision = generation;
+        if (!removed) lastEffect = -1;
         old?.Dispose();
         ResetZoom();
     }
@@ -76,12 +88,8 @@ internal sealed class PlaybackSurface : Control
         Invalidate();
     }
 
-    private RectangleF PictureArea()
-    {
-        if (!Options.ReserveBarSpace) return ClientRectangle;
-        int inset = Math.Clamp(BarBounds.Height + 38, 0, Math.Max(0, Height - 1));
-        return new RectangleF(0, Options.BarAtTop ? inset : 0, Width, Math.Max(1, Height - inset));
-    }
+    private RectangleF PictureArea() =>
+        Geometry.PictureArea(image is null ? 16f / 9 : (float)image.Width / image.Height);
 
     private RectangleF ImageBounds(RectangleF area)
     {
@@ -95,7 +103,7 @@ internal sealed class PlaybackSurface : Control
     protected override void OnMouseDown(MouseEventArgs e)
     {
         base.OnMouseDown(e);
-        if (e.Button != MouseButtons.Left) return;
+        if (e.Button != MouseButtons.Left || Editing) return;
         Focus();
         Capture = true;
         held = true;
@@ -107,7 +115,7 @@ internal sealed class PlaybackSurface : Control
     protected override void OnMouseUp(MouseEventArgs e)
     {
         base.OnMouseUp(e);
-        if (e.Button != MouseButtons.Left) return;
+        if (e.Button != MouseButtons.Left || Editing) return;
         if (!held || zoomed || pressedRevision < 0 || pressedRevision != revision)
             firstClick = -1;
         else if (clicks == 1)
@@ -129,7 +137,6 @@ internal sealed class PlaybackSurface : Control
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
-        Reveal?.Invoke();
         base.OnMouseMove(e);
     }
 
@@ -141,7 +148,7 @@ internal sealed class PlaybackSurface : Control
 
     internal void ApplyWheel(int delta, Point location)
     {
-        if (delta == 0) return;
+        if (delta == 0 || Editing) return;
         if (held || (MouseButtons & MouseButtons.Left) != 0)
         {
             zoomed = true;
@@ -150,6 +157,7 @@ internal sealed class PlaybackSurface : Control
             var area = PictureArea();
             var prior = ImageBounds(area);
             double next = Math.Clamp(zoom * Math.Pow(1.19, -delta / 120.0), 1, 8);
+            if (next == zoom) return;
             float ratio = (float)(next / zoom);
             zoom = next;
             float x = location.X + (prior.X + prior.Width / 2 - location.X) * ratio - (area.X + area.Width / 2);
@@ -158,6 +166,7 @@ internal sealed class PlaybackSurface : Control
             float limitY = Math.Max(0, (prior.Height * ratio - area.Height) / 2);
             offset = zoom == 1 ? PointF.Empty : new(Math.Clamp(x, -limitX, limitX), Math.Clamp(y, -limitY, limitY));
             Invalidate();
+            ZoomChanged?.Invoke();
         }
         else MovePhoto?.Invoke(delta < 0 ? 1 : -1);
     }
@@ -181,7 +190,7 @@ internal sealed class PlaybackSurface : Control
         }
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
         LayoutOverlays();
-        if (Options.ClockVisible) DrawClock(e.Graphics);
+        if (Options.ClockVisible || Editing) DrawClock(e.Graphics);
         if (status.Length > 0)
         {
             var areaText = new Rectangle((Width - 360) / 2, 12, 360, 28);
@@ -190,36 +199,37 @@ internal sealed class PlaybackSurface : Control
             TextRenderer.DrawText(e.Graphics, status, Font, areaText, Color.White,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
         }
-        if (lastEffect >= 0)
+        double elapsed = EffectActive ? Stopwatch.GetElapsedTime(lastEffect).TotalSeconds : double.PositiveInfinity;
+        if (elapsed >= 1.25) lastEffect = -1;
+        if (Editing) DrawHeart(e.Graphics, "♡", Color.Silver, 255, false);
+        else
         {
-            double time = Stopwatch.GetElapsedTime(lastEffect).TotalSeconds;
-            if (time < 1.25) DrawEffect(e.Graphics, time);
-            else lastEffect = -1;
+            if (image is not null && IsFavorite && (!EffectActive || removed || elapsed > 0.75))
+                DrawHeart(e.Graphics, "♥", Color.HotPink, 255, false);
+            if (EffectActive) DrawEffect(e.Graphics, elapsed);
         }
         base.OnPaint(e);
     }
 
-    private void LayoutOverlays()
-    {
-        Size size = Options.AnalogClock ? new(76, 76) : new(144, 56);
-        clockRect = new RectangleF(Options.ClockAtLeft ? 16 : Width - size.Width - 16, 16, size.Width, size.Height);
-        if (clockRect.IntersectsWith(BarBounds)) clockRect.Y = BarBounds.Bottom + 12;
-        indicatorRect = new RectangleF(Width - 75, 16, 56, 56);
-        if (indicatorRect.IntersectsWith(BarBounds)) indicatorRect.Y = BarBounds.Bottom + 12;
-        if (Options.ClockVisible && indicatorRect.IntersectsWith(clockRect)) indicatorRect.Y = clockRect.Bottom + 12;
-    }
+    private void LayoutOverlays() =>
+        (clockRect, indicatorRect) = Geometry.Overlays(Editing);
 
     private void DrawClock(Graphics graphics)
     {
+        var state = graphics.Save();
+        graphics.TranslateTransform(clockRect.X, clockRect.Y);
+        graphics.ScaleTransform(clockRect.Width / 144, clockRect.Height / 76);
+        var area = new RectangleF(0, 0, 144, 76);
         using var shade = new SolidBrush(Color.FromArgb(214, Color.Black));
-        graphics.FillRoundedRectangle(shade, clockRect, new SizeF(12, 12));
+        graphics.FillRoundedRectangle(shade, area, new SizeF(12, 12));
         DateTime now = DateTime.Now;
         if (!Options.AnalogClock)
         {
-            Center(graphics, now.ToString("HH:mm"), digitalFont, Brushes.White, clockRect);
+            Center(graphics, now.ToString("HH:mm"), digitalFont, Brushes.White, area);
+            graphics.Restore(state);
             return;
         }
-        var center = new PointF(clockRect.X + clockRect.Width / 2, clockRect.Y + clockRect.Height / 2);
+        var center = new PointF(72, 38);
         void Hand(double angle, float start, float end, float width, Color color)
         {
             using var pen = new Pen(color, width) { StartCap = LineCap.Round, EndCap = LineCap.Round };
@@ -231,32 +241,63 @@ internal sealed class PlaybackSurface : Control
         Hand((now.Hour % 12 + now.Minute / 60.0) * Math.PI / 6, 0, 17, 4, Color.White);
         Hand(now.Minute * Math.PI / 30, 0, 24, 3, Color.White);
         Hand(now.Second * Math.PI / 30, 0, 27, 1, Color.Gold);
+        graphics.Restore(state);
+    }
+
+    private void DrawHeart(Graphics graphics, string glyph, Color color, int alpha, bool glow)
+    {
+        var state = graphics.Save();
+        graphics.TranslateTransform(indicatorRect.X, indicatorRect.Y);
+        graphics.ScaleTransform(indicatorRect.Width / 56, indicatorRect.Height / 56);
+        var area = new RectangleF(0, 0, 56, 56);
+        using var shade = new SolidBrush(Color.FromArgb(alpha * 3 / 4, Color.Black));
+        graphics.FillRoundedRectangle(shade, area, new SizeF(12, 12));
+        if (glow)
+        {
+            using var halo = new SolidBrush(Color.FromArgb(alpha / 3, Color.HotPink));
+            for (int dx = -2; dx <= 2; dx++)
+                for (int dy = -2; dy <= 2; dy++)
+                    Center(graphics, glyph, symbol, halo, new RectangleF(dx, dy, 56, 56));
+        }
+        using var ink = new SolidBrush(Color.FromArgb(alpha, color));
+        Center(graphics, glyph, symbol, ink, area);
+        if (removed && glyph == "♡" && !Editing)
+        {
+            using var mark = new SolidBrush(Color.FromArgb(alpha, Color.LightCoral));
+            using var font = new Font("Segoe UI", 18, FontStyle.Bold, GraphicsUnit.Pixel);
+            graphics.FillEllipse(shade, 33, 30, 19, 19);
+            Center(graphics, "×", font, mark, new RectangleF(33, 30, 19, 19));
+        }
+        graphics.Restore(state);
     }
 
     private void DrawEffect(Graphics graphics, double time)
     {
         int alpha = (int)(255 * Math.Clamp((1.25 - time) / 0.5, 0, 1));
-        using var shade = new SolidBrush(Color.FromArgb(alpha * 3 / 4, Color.Black));
-        graphics.FillRoundedRectangle(shade, indicatorRect, new SizeF(12, 12));
-        if (!removed)
+        DrawHeart(graphics, "♡", Color.White, alpha, !removed);
+        if (bounce && time < 0.46)
         {
-            using var glow = new SolidBrush(Color.FromArgb(alpha / 3, Color.Gold));
-            for (int dx = -2; dx <= 2; dx++)
-                for (int dy = -2; dy <= 2; dy++)
-                    Center(graphics, "☆", symbol, glow, new RectangleF(indicatorRect.X + dx, indicatorRect.Y + dy,
-                        indicatorRect.Width, indicatorRect.Height));
+            var state = graphics.Save();
+            float wave = MathF.Sin((float)(time / 0.46 * Math.PI));
+            float scale = BarBounds.Width / 510f;
+            graphics.TranslateTransform(FavoriteOrigin.X,
+                FavoriteOrigin.Y + (BarBounds.Top + BarBounds.Height / 2f < Height / 2f ? 36 : -36) * wave * scale);
+            graphics.ScaleTransform(scale, scale);
+            float size = 42 + 8 * wave;
+            Center(graphics, "♥", symbol, Brushes.HotPink, new RectangleF(-size / 2, -size / 2, size, size));
+            graphics.Restore(state);
         }
-        using var ink = new SolidBrush(Color.FromArgb(alpha, Color.White));
-        Center(graphics, removed ? "☆×" : "☆", symbol, ink, indicatorRect);
         if (fall && time < 0.85)
         {
             var state = graphics.Save();
             float phase = (float)(time / 0.85);
-            float y = BarBounds.Y + BarBounds.Height / 2;
-            graphics.TranslateTransform(BarBounds.X + BarBounds.Width * 0.64f + 35 * phase,
+            float y = FavoriteOrigin.Y;
+            graphics.TranslateTransform(FavoriteOrigin.X + 35 * phase,
                 y + (Height - y + 60) * phase * phase);
             graphics.RotateTransform(phase * 105);
-            Center(graphics, "★", symbol, Brushes.Gold, new RectangleF(-25, -25, 50, 50));
+            float scale = BarBounds.Width / 510f;
+            graphics.ScaleTransform(scale, scale);
+            Center(graphics, "♥", symbol, Brushes.HotPink, new RectangleF(-25, -25, 50, 50));
             graphics.Restore(state);
         }
     }

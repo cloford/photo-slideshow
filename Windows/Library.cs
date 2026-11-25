@@ -5,6 +5,39 @@ namespace PhotoSlideshow;
 internal sealed record Options
 {
     public int Seconds { get; set; } = 5;
+    public int BarHideSeconds { get; set; } = 3;
+    public bool NoticeAtLeft { get; set; }
+    public OverlayPlacement ClockPlacement { get; set; } = new();
+    public OverlayPlacement HeartPlacement { get; set; } = new();
+    public OverlayPlacement BarPlacement { get; set; } = new();
+
+    public OverlayPlacement Placement(OverlayItem item) => item switch
+    {
+        OverlayItem.Clock => ClockPlacement,
+        OverlayItem.Heart => HeartPlacement,
+        _ => BarPlacement
+    };
+
+    public void SetPlacement(OverlayItem item, OverlayPlacement placement)
+    {
+        switch (item)
+        {
+            case OverlayItem.Clock: ClockPlacement = placement; break;
+            case OverlayItem.Heart: HeartPlacement = placement; break;
+            case OverlayItem.Bar: BarPlacement = placement; break;
+        }
+    }
+
+    public void ResetPosition(OverlayItem item)
+    {
+        SetPlacement(item, Placement(item) with { Position = null });
+        switch (item)
+        {
+            case OverlayItem.Clock: ClockAtLeft = false; break;
+            case OverlayItem.Heart: NoticeAtLeft = false; break;
+            case OverlayItem.Bar: BarAtTop = false; break;
+        }
+    }
     public bool FromBeginning { get; set; }
     public bool ReserveBarSpace { get; set; }
     public bool BarAtTop { get; set; }
@@ -38,6 +71,7 @@ internal sealed class Store
             var data = JsonSerializer.Deserialize<UserData>(File.ReadAllText(path))
                 ?? throw new JsonException();
             data.LastByFolder = new(data.LastByFolder, StringComparer.OrdinalIgnoreCase);
+            data.Settings.BarHideSeconds = Math.Clamp(data.Settings.BarHideSeconds, 1, 60);
             data.Settings.Seconds = Math.Clamp(data.Settings.Seconds, 1, 300);
             return data;
         }

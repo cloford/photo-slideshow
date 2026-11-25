@@ -122,6 +122,11 @@ final class Playback {
         }
     }
 
+    func zoomDidChange() {
+        guard !paused, !panelOpen, search == nil else { return }
+        scheduleNext()
+    }
+
     func jump(to index: Int) {
         guard active, photos.indices.contains(index) else { return }
         startSearch(at: index, direction: 1, origin: .jump)

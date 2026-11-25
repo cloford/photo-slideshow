@@ -456,6 +456,10 @@ final class SlideshowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func handleKey(_ key: WindowKey, repeatEvent: Bool) -> Bool {
+        if let editor = slideshow?.panel as? LayoutEditor {
+            if key == .escape && !repeatEvent { editor.finish.perform?() }
+            return true
+        }
         if key == .escape {
             if !repeatEvent { beginExit(reason: "Escape") }
             return true
@@ -474,13 +478,11 @@ final class SlideshowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func move(_ direction: Int) {
         guard slideshow?.panel == nil else { return }
-        slideshow?.showBar()
         playback?.move(direction)
     }
 
     private func togglePause() {
         guard slideshow?.panel == nil else { return }
-        slideshow?.showBar()
         playback?.togglePause()
         updateControls()
     }
@@ -490,6 +492,7 @@ final class SlideshowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func handleWheel(_ event: NSEvent) -> Bool {
+        if slideshow?.panel is LayoutEditor { return true }
         guard mode == .playback, slideshow?.panel == nil, playback != nil else {
             wheel = WheelNavigation()
             return false
@@ -504,7 +507,7 @@ final class SlideshowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let delta = WheelNavigation.verticalDelta(scrolling: event.scrollingDeltaY, lines: lines,
                                                   precise: precise, inverted: event.isDirectionInvertedFromDevice)
         if NSEvent.pressedMouseButtons & 1 != 0 {
-            slideshow?.zoom(for: event, delta: delta)
+            if slideshow?.zoom(for: event, delta: delta) == true { playback?.zoomDidChange() }
             wheel.resetGesture()
             return true
         }
@@ -553,18 +556,34 @@ final class SlideshowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         slideshow.layoutSubtreeIfNeeded()
         panel.layoutSubtreeIfNeeded()
         panel.selectCurrent()
-        window?.makeFirstResponder(panel.table)
+        window?.makeFirstResponder(panel.grid)
         updateControls()
     }
 
     private func openPreferences() {
         guard let slideshow, slideshow.panel == nil else { return }
         let panel = PreferencesPanel(preferences)
-        panel.close.perform = { [weak self] in self?.closePanel() }
+        panel.preview = { [weak slideshow] value in slideshow?.applyPreferences(value) }
+        panel.editLayout.perform = { [weak self, weak panel, weak slideshow] in
+            guard let self, let panel, preferencesWrite == nil else { return }
+            let editor = LayoutEditor(panel.previewValue())
+            editor.changed = { [weak slideshow] value in slideshow?.applyPreferences(value) }
+            editor.finish.perform = { [weak self, weak editor, panel] in
+                guard let self, let editor else { return }
+                panel.updateLayoutDraft(editor.options)
+                self.slideshow?.installPanel(panel)
+                self.slideshow?.applyPreferences(panel.previewValue())
+                self.window?.makeFirstResponder(nil)
+                self.updateControls()
+            }
+            window?.makeFirstResponder(nil)
+            self.slideshow?.installPanel(editor)
+            self.slideshow?.applyPreferences(editor.options)
+            updateControls()
+        }
         panel.save.perform = { [weak self, weak panel] in
             guard let self, let panel, preferencesWrite == nil, let value = panel.value else { return }
             panel.save.isEnabled = false
-            panel.close.isEnabled = false
             preferencesWrite = Task { [weak self, weak panel] in
                 guard let self else { return }
                 let saved = await data.savePreferences(value)
@@ -577,7 +596,6 @@ final class SlideshowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 } else {
                     panel?.error.stringValue = "設定を保存できませんでした。"
                     panel?.save.isEnabled = true
-                    panel?.close.isEnabled = true
                 }
             }
         }
@@ -621,7 +639,11 @@ final class SlideshowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 if !exiting {
                     (slideshow?.panel as? PhotosPanel)?.updateFavorites(favoriteIDs)
                     if add {
-                        slideshow?.showFavoriteConfirmation()
+                        let currentRevision = displayedPhotoID == photo.id ? self.playback?.displayedRevision : nil
+                        if let currentRevision {
+                            slideshow?.setFavoriteStatus(true, revision: currentRevision)
+                        }
+                        slideshow?.showFavoriteConfirmation(revision: currentRevision)
                     } else {
                         let currentRevision = displayedPhotoID == photo.id ? self.playback?.displayedRevision : nil
                         slideshow?.showFavoriteRemoval(fallFrom: currentRevision ?? clickedRevision)
@@ -671,7 +693,10 @@ final class SlideshowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
                               powerWarning: powerWarning)
     }
 
-    @objc private func returnToPreviousScreen() { beginExit(reason: "return button") }
+    @objc private func returnToPreviousScreen() {
+        guard !(slideshow?.panel is LayoutEditor) else { return }
+        beginExit(reason: "return button")
+    }
 
     private func beginExit(reason: String) {
         guard !exiting else { return }

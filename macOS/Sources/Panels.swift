@@ -47,16 +47,21 @@ final class PreferencesPanel: NSView, NSTextFieldDelegate {
     let seconds = NSTextField(string: "")
     let start = NSSegmentedControl(labels: ["前回の続き", "先頭から"], trackingMode: .selectOne, target: nil, action: nil)
     let area = NSSegmentedControl(labels: ["画面全体", "操作バー分の余白を確保"], trackingMode: .selectOne, target: nil, action: nil)
-    let edge = NSSegmentedControl(labels: ["上", "下"], trackingMode: .selectOne, target: nil, action: nil)
+    let edge = NSSegmentedControl(labels: ["上", "下", "カスタム"], trackingMode: .selectOne, target: nil, action: nil)
     let clock = NSSwitch()
     let clockStyle = NSSegmentedControl(labels: ["アナログ", "デジタル"], trackingMode: .selectOne, target: nil, action: nil)
-    let clockSide = NSSegmentedControl(labels: ["左上", "右上"], trackingMode: .selectOne, target: nil, action: nil)
-    let save = ActionButton("保存して閉じる")
-    let close = ActionButton("閉じる")
+    let clockSide = NSSegmentedControl(labels: ["左上", "右上", "カスタム"], trackingMode: .selectOne, target: nil, action: nil)
+    let hideSeconds = NSTextField(string: "")
+    let noticeSide = NSSegmentedControl(labels: ["左上", "右上", "カスタム"], trackingMode: .selectOne, target: nil, action: nil)
+    let editLayout = ActionButton("配置を編集")
+    let save = ActionButton("閉じる")
+    var preview: ((PlaybackPreferences) -> Void)?
+    private var draft: PlaybackPreferences
     let error = NSTextField(labelWithString: "")
     private let stepper = NSStepper()
 
     init(_ preferences: PlaybackPreferences) {
+        draft = preferences
         super.init(frame: .zero)
         panelSurface(self)
         appearance = NSAppearance(named: .darkAqua)
@@ -84,10 +89,16 @@ final class PreferencesPanel: NSView, NSTextFieldDelegate {
         })
         start.selectedSegment = preferences.fromBeginning ? 1 : 0
         area.selectedSegment = preferences.reserveBarSpace ? 1 : 0
-        edge.selectedSegment = preferences.barEdge == .top ? 0 : 1
         clock.state = preferences.clockVisible ? .on : .off
         clockStyle.selectedSegment = preferences.clockStyle == .analog ? 0 : 1
-        clockSide.selectedSegment = preferences.clockSide == .left ? 0 : 1
+        hideSeconds.setAccessibilityLabel("操作バーを隠すまで")
+        hideSeconds.stringValue = String(preferences.barHideSeconds)
+        hideSeconds.widthAnchor.constraint(equalToConstant: 64).isActive = true
+        updateLayoutDraft(preferences)
+        for control in [edge, clock, clockStyle, clockSide, area, noticeSide] as [NSControl] {
+            control.target = self
+            control.action = #selector(previewChanged)
+        }
         save.bezelColor = .controlAccentColor
         save.keyEquivalent = "\r"
         error.textColor = .systemRed
@@ -109,21 +120,30 @@ final class PreferencesPanel: NSView, NSTextFieldDelegate {
         }
         let hint = NSTextField(labelWithString: "「画面全体」では操作バーを写真に重ねます。")
         hint.textColor = .secondaryLabelColor
-        let footer = NSStackView(views: [close, save])
+        let footer = NSStackView(views: [editLayout, NSView(), save])
+        footer.distribution = .fill
         footer.translatesAutoresizingMaskIntoConstraints = false
-        let footerRow = NSView()
-        footerRow.addSubview(footer)
+        editLayout.setContentHuggingPriority(.required, for: .horizontal)
+        save.setContentHuggingPriority(.required, for: .horizontal)
+        error.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(footer)
+        addSubview(error)
         NSLayoutConstraint.activate([
-            footer.trailingAnchor.constraint(equalTo: footerRow.trailingAnchor),
-            footer.topAnchor.constraint(equalTo: footerRow.topAnchor),
-            footer.bottomAnchor.constraint(equalTo: footerRow.bottomAnchor)
+            footer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 28),
+            footer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -28),
+            footer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -16),
+            error.leadingAnchor.constraint(equalTo: footer.leadingAnchor),
+            error.trailingAnchor.constraint(equalTo: footer.trailingAnchor),
+            error.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -6)
         ])
         let items: [NSView] = [
             title, NSBox(), heading("再生"), row("1枚の表示時間", value), row("", presets),
             row("起動位置", start), NSBox(), heading("画面表示"), row("画像の表示領域", area),
             row("", hint), row("操作バーの位置", edge), NSBox(), heading("時計"),
             row("時計を表示", clock), row("時計の種類", clockStyle), row("時計の位置", clockSide),
-            NSBox(), error, footerRow
+            NSBox(), heading("操作バーと通知"),
+            row("操作バーを隠すまで", NSStackView(views: [hideSeconds, NSTextField(labelWithString: "秒（1〜60）")])),
+            row("お気に入りの位置", noticeSide)
         ]
         let stack = NSStackView(views: items)
         for box in items.compactMap({ $0 as? NSBox }) {
@@ -132,7 +152,6 @@ final class PreferencesPanel: NSView, NSTextFieldDelegate {
         }
         stack.orientation = .vertical
         stack.alignment = .leading
-        footerRow.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         stack.spacing = 10
         let content = SettingsDocumentView()
         let scroll = NSScrollView()
@@ -147,7 +166,7 @@ final class PreferencesPanel: NSView, NSTextFieldDelegate {
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
             scroll.topAnchor.constraint(equalTo: topAnchor),
-            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
+            scroll.bottomAnchor.constraint(equalTo: error.topAnchor, constant: -6),
             content.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
             stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 25),
             stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 28),
@@ -165,14 +184,47 @@ final class PreferencesPanel: NSView, NSTextFieldDelegate {
         window?.makeFirstResponder(nil)
         guard let value = Int(seconds.stringValue.trimmingCharacters(in: .whitespaces)), (1...300).contains(value)
         else { error.stringValue = "1〜300秒の整数を入力してください。"; return nil }
-        var preferences = PlaybackPreferences(seconds: value, fromBeginning: start.selectedSegment == 1)
-        preferences.reserveBarSpace = area.selectedSegment == 1
-        preferences.barEdge = edge.selectedSegment == 0 ? .top : .bottom
-        preferences.clockVisible = clock.state == .on
-        preferences.clockStyle = clockStyle.selectedSegment == 0 ? .analog : .digital
-        preferences.clockSide = clockSide.selectedSegment == 0 ? .left : .right
+        guard let delay = Int(hideSeconds.stringValue.trimmingCharacters(in: .whitespaces)), (1...60).contains(delay)
+        else { error.stringValue = "バーを隠す時間は1〜60秒で入力してください。"; return nil }
+        var preferences = previewValue()
+        preferences.seconds = value
+        preferences.fromBeginning = start.selectedSegment == 1
+        preferences.barHideSeconds = delay
         return preferences
     }
+
+    func updateLayoutDraft(_ value: PlaybackPreferences) {
+        draft = value
+        func setChoices(_ control: NSSegmentedControl, placement: OverlayPlacement, preset: Int) {
+            control.setEnabled(placement.position != nil, forSegment: 2)
+            control.selectedSegment = placement.custom ? 2 : preset
+        }
+        setChoices(edge, placement: value.barPlacement, preset: value.barEdge == .top ? 0 : 1)
+        setChoices(clockSide, placement: value.clockPlacement, preset: value.clockSide == .left ? 0 : 1)
+        setChoices(noticeSide, placement: value.heartPlacement, preset: value.noticeSide == .left ? 0 : 1)
+    }
+
+    func previewValue() -> PlaybackPreferences {
+        var preferences = draft
+        preferences.reserveBarSpace = area.selectedSegment == 1
+        preferences.barPlacement.usePresetPosition = edge.selectedSegment != 2
+        if edge.selectedSegment != 2 {
+            preferences.barEdge = edge.selectedSegment == 0 ? .top : .bottom
+        }
+        preferences.clockVisible = clock.state == .on
+        preferences.clockStyle = clockStyle.selectedSegment == 0 ? .analog : .digital
+        preferences.clockPlacement.usePresetPosition = clockSide.selectedSegment != 2
+        if clockSide.selectedSegment != 2 {
+            preferences.clockSide = clockSide.selectedSegment == 0 ? .left : .right
+        }
+        preferences.heartPlacement.usePresetPosition = noticeSide.selectedSegment != 2
+        if noticeSide.selectedSegment != 2 {
+            preferences.noticeSide = noticeSide.selectedSegment == 0 ? .left : .right
+        }
+        return preferences
+    }
+
+    @objc private func previewChanged() { preview?(previewValue()) }
 
     private func setSeconds(_ value: Int) {
         seconds.stringValue = String(value)
@@ -193,77 +245,97 @@ final class PreferencesPanel: NSView, NSTextFieldDelegate {
     }
 }
 
-final class PhotoRow: NSTableCellView {
+final class PhotoTile: NSCollectionViewItem {
     private let picture = NSImageView()
-    private let label = NSTextField(labelWithString: "")
-    let remove = ActionButton("お気に入り解除")
+    private let openPhoto = ActionButton("")
+    let remove = ActionButton("")
     private var cancel: (() -> Void)?
-    private var metadata: Task<Void, Never>?
-    private var token = UUID()
+    private var requestID = UUID()
 
-    func stop() { cancel?(); cancel = nil; metadata?.cancel(); token = UUID() }
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
+    override func loadView() {
+        view = NSView()
+        view.wantsLayer = true
+        view.layer?.cornerRadius = 8
+        view.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.28).cgColor
         picture.imageScaling = .scaleProportionallyUpOrDown
-        picture.translatesAutoresizingMaskIntoConstraints = false
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.lineBreakMode = .byTruncatingTail
-        addSubview(picture)
-        addSubview(label)
-        remove.translatesAutoresizingMaskIntoConstraints = false
-        remove.setContentHuggingPriority(.required, for: .horizontal)
-        addSubview(remove)
+        openPhoto.isBordered = false
+        for item in [picture, openPhoto, remove] {
+            item.translatesAutoresizingMaskIntoConstraints = false
+            view.addSubview(item)
+        }
+        remove.imagePosition = .imageOnly
+        remove.image = NSImage(systemSymbolName: "heart.fill", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .semibold))
+        remove.contentTintColor = NSColor(srgbRed: 1, green: 0.36, blue: 0.62, alpha: 1)
+        remove.isBordered = false
+        remove.wantsLayer = true
+        remove.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.8).cgColor
+        remove.layer?.cornerRadius = 10
+        remove.toolTip = "この写真のお気に入りを解除"
         NSLayoutConstraint.activate([
-            picture.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            picture.centerYAnchor.constraint(equalTo: centerYAnchor),
-            picture.widthAnchor.constraint(equalToConstant: 66),
-            picture.heightAnchor.constraint(equalToConstant: 46),
-            label.leadingAnchor.constraint(equalTo: picture.trailingAnchor, constant: 12),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: remove.leadingAnchor, constant: -8),
-            remove.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            remove.centerYAnchor.constraint(equalTo: centerYAnchor),
-            label.centerYAnchor.constraint(equalTo: centerYAnchor)
+            picture.topAnchor.constraint(equalTo: view.topAnchor, constant: 5),
+            picture.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -5),
+            picture.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 5),
+            picture.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -5),
+            openPhoto.topAnchor.constraint(equalTo: view.topAnchor),
+            openPhoto.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            openPhoto.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            openPhoto.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            remove.widthAnchor.constraint(equalToConstant: 22),
+            remove.heightAnchor.constraint(equalToConstant: 20),
+            remove.topAnchor.constraint(equalTo: view.topAnchor, constant: 3),
+            remove.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -3)
         ])
     }
 
-    required init?(coder: NSCoder) { nil }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        if window == nil { stop() }
+    func stop() {
+        requestID = UUID()
+        cancel?()
+        cancel = nil
     }
 
-    func show(_ photo: Photo, index: Int, source: any PhotoSource, favorite: Bool) {
+    override func prepareForReuse() {
         stop()
-        let request = token
-        let date = photo.date?.formatted(date: .abbreviated, time: .shortened)
-        let line = ["\(index + 1)" + (favorite ? " ★" : ""), date].compactMap { $0 }.joined(separator: "   ")
-        label.stringValue = line
+        super.prepareForReuse()
+    }
+
+    func configure(photo: Photo, index: Int, source: any PhotoSource, favorite: Bool, current: Bool,
+                   canRemove: Bool, select: @escaping () -> Void, unmark: @escaping () -> Void) {
+        stop()
+        loadViewIfNeeded()
+        view.layer?.borderWidth = current ? 3 : 0
+        view.layer?.borderColor = NSColor.controlAccentColor.cgColor
+        openPhoto.setAccessibilityLabel("\(index + 1)枚目を表示" + (current ? "、現在の写真" : ""))
+        openPhoto.perform = select
+        remove.setAccessibilityLabel("\(index + 1)枚目のお気に入り解除")
+        remove.perform = unmark
+        remove.isHidden = !favorite
+        remove.isEnabled = canRemove
         picture.image = nil
-        cancel = source.requestThumbnail(for: photo, size: CGSize(width: 132, height: 92)) { [weak self] result in
-            guard let self, token == request, case .image(let image) = result else { return }
+        let token = requestID
+        #if SLIDESHOW_QA
+        qaTrace("thumbnail \(index)")
+        #endif
+        cancel = source.requestThumbnail(for: photo, size: CGSize(width: 300, height: 220)) { [weak self] result in
+            guard let self, requestID == token, case .image(let image) = result else { return }
             picture.image = image.image
-        }
-        metadata = Task { [weak self] in
-            let name = await source.resources(for: photo).first?.filename
-            guard let self, !Task.isCancelled, token == request, let name else { return }
-            label.stringValue = line + "   " + name
         }
     }
 }
 
-final class PhotosPanel: NSView, NSTableViewDataSource, NSTableViewDelegate {
+final class PhotosPanel: NSView, NSCollectionViewDataSource, NSCollectionViewDelegate {
     private let source: any PhotoSource
     private let photos: [Photo]
     private var favorites: Set<String>
-    private var removalEnabled = true
     private let current: Int?
     private var indices: [Int] = []
-    let table = NSTableView()
+    private var removalEnabled = true
+    private let scroll = NSScrollView()
+    private let filter = NSSegmentedControl(labels: ["すべて", "お気に入り"], trackingMode: .selectOne, target: nil, action: nil)
+    private let empty = NSTextField(labelWithString: "お気に入りの写真はありません。")
+    private let tileID = NSUserInterfaceItemIdentifier("photo-tile")
+    let grid = NSCollectionView()
     let close = ActionButton("閉じる")
-    private let filter = ActionButton("お気に入りのみ")
-    private let empty = NSTextField(labelWithString: "このアルバムにお気に入りはありません。")
     var choose: ((Int) -> Void)?
     var removeFavorite: ((Int) -> Void)?
 
@@ -276,27 +348,25 @@ final class PhotosPanel: NSView, NSTableViewDataSource, NSTableViewDelegate {
         panelSurface(self)
         let title = NSTextField(labelWithString: "写真一覧")
         title.font = .boldSystemFont(ofSize: 18)
-        let scroll = NSScrollView()
-        for view in [title, close, filter, scroll, empty] {
-            view.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(view)
-        }
-        filter.setButtonType(.pushOnPushOff)
-        filter.perform = { [weak self] in self?.reload() }
-        let column = NSTableColumn(identifier: .init("photo"))
-        table.addTableColumn(column)
-        table.headerView = nil
-        table.rowHeight = 54
-        table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
-        table.usesAlternatingRowBackgroundColors = true
-        table.dataSource = self
-        table.delegate = self
-        table.target = self
-        table.action = #selector(clicked)
-        table.setAccessibilityLabel("アルバム内の写真")
-        scroll.documentView = table
+        filter.selectedSegment = 0
+        filter.target = self
+        filter.action = #selector(filterChanged)
+        let layout = NSCollectionViewFlowLayout()
+        layout.itemSize = CGSize(width: 140, height: 108)
+        layout.minimumLineSpacing = 10
+        layout.minimumInteritemSpacing = 8
+        layout.sectionInset = NSEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
+        grid.collectionViewLayout = layout
+        grid.register(PhotoTile.self, forItemWithIdentifier: tileID)
+        grid.dataSource = self
+        grid.delegate = self
+        grid.setAccessibilityLabel("サムネイル一覧")
+        scroll.documentView = grid
         scroll.hasVerticalScroller = true
-        scroll.borderType = .bezelBorder
+        for child in [title, filter, close, scroll, empty] {
+            child.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(child)
+        }
         NSLayoutConstraint.activate([
             title.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
             title.centerYAnchor.constraint(equalTo: close.centerYAnchor),
@@ -317,60 +387,61 @@ final class PhotosPanel: NSView, NSTableViewDataSource, NSTableViewDelegate {
     required init?(coder: NSCoder) { nil }
 
     func setRemovalEnabled(_ enabled: Bool) {
-        guard removalEnabled != enabled else { return }
         removalEnabled = enabled
-        table.enumerateAvailableRowViews { [table] _, row in
-            (table.view(atColumn: 0, row: row, makeIfNecessary: false) as? PhotoRow)?.remove.isEnabled = enabled
-        }
+        for case let tile as PhotoTile in grid.visibleItems() { tile.remove.isEnabled = enabled }
     }
 
     func updateFavorites(_ favorites: Set<String>) {
         self.favorites = favorites
-        let offset = table.enclosingScrollView?.contentView.bounds.origin
+        let offset = scroll.contentView.bounds.origin
         reload()
-        if let scroll = table.enclosingScrollView, let offset {
-            scroll.contentView.scroll(to: offset)
-            scroll.reflectScrolledClipView(scroll.contentView)
-        }
+        scroll.contentView.scroll(to: offset)
+        scroll.reflectScrolledClipView(scroll.contentView)
     }
 
-    func reload() {
-        indices = photos.indices.filter { filter.state == .off || favorites.contains(photos[$0].id) }
+    @objc private func filterChanged() { reload(); selectCurrent() }
+
+    private func reload() {
+        let filtered = filter.selectedSegment == 1
+        indices = photos.indices.filter { !filtered || favorites.contains(photos[$0].id) }
         #if SLIDESHOW_QA
-        qaTrace("list filtered=\(filter.state == .on) rows=\(indices.count)")
+        qaTrace("list filtered=\(filtered) rows=\(indices.count)")
         #endif
-        table.reloadData()
+        grid.reloadData()
         empty.isHidden = !indices.isEmpty
-        selectCurrent()
     }
 
     func selectCurrent() {
-        if let current, let row = indices.firstIndex(of: current) {
-            table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-            table.scrollRowToVisible(row)
-        } else {
-            table.deselectAll(nil)
+        grid.layoutSubtreeIfNeeded()
+        if let current, let index = indices.firstIndex(of: current) {
+            grid.scrollToItems(at: [IndexPath(item: index, section: 0)], scrollPosition: .centeredVertically)
         }
     }
 
-    func numberOfRows(in tableView: NSTableView) -> Int { indices.count }
-
-    func tableView(_ tableView: NSTableView, viewFor column: NSTableColumn?, row: Int) -> NSView? {
-        let identifier = NSUserInterfaceItemIdentifier("photo-cell")
-        let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? PhotoRow ?? PhotoRow(frame: .zero)
-        cell.identifier = identifier
-        let index = indices[row]
-        let favorite = favorites.contains(photos[index].id)
-        cell.remove.isHidden = !favorite
-        cell.remove.isEnabled = removalEnabled
-        cell.remove.setAccessibilityLabel("\(index + 1)枚目のお気に入り解除")
-        cell.remove.perform = { [weak self] in self?.removeFavorite?(index) }
-        cell.show(photos[index], index: index, source: source, favorite: favorite)
-        return cell
+    func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int) -> Int {
+        indices.count
     }
 
-    @objc private func clicked() {
-        let row = table.clickedRow
-        if indices.indices.contains(row) { choose?(indices[row]) }
+    func collectionView(_ collectionView: NSCollectionView, itemForRepresentedObjectAt indexPath: IndexPath) -> NSCollectionViewItem {
+        let tile = grid.makeItem(withIdentifier: tileID, for: indexPath) as! PhotoTile
+        let index = indices[indexPath.item]
+        let photo = photos[index]
+        tile.configure(photo: photo, index: index, source: source, favorite: favorites.contains(photo.id),
+                       current: current == index, canRemove: removalEnabled,
+                       select: { [weak self] in self?.choose?(index) },
+                       unmark: { [weak self] in self?.removeFavorite?(index) })
+        return tile
+    }
+
+    func collectionView(_ collectionView: NSCollectionView, didEndDisplaying item: NSCollectionViewItem,
+                        forRepresentedObjectAt indexPath: IndexPath) {
+        (item as? PhotoTile)?.stop()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            for case let tile as PhotoTile in grid.visibleItems() { tile.stop() }
+        }
     }
 }

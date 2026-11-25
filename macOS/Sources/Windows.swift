@@ -147,14 +147,25 @@ final class SlideshowView: NSView {
     let favoriteStatus = ActionButton("お気に入りに登録")
     private let fallingStar = PassiveImageView()
     private var fallTask: Task<Void, Never>?
+    private let bouncingHeart = PassiveImageView()
+    private var bounceTask: Task<Void, Never>?
+    private var bouncingRevision: UUID?
     private var favoriteRevision: UUID?
     private var fallingRevision: UUID?
     private var photoIsFavorite = false
     private var iconSize: CGFloat = 32
-    private static let gold = NSColor(srgbRed: 1, green: 0.76, blue: 0.32, alpha: 1)
+    private static let pink = NSColor(srgbRed: 1, green: 0.36, blue: 0.62, alpha: 1)
     private static let outline = NSColor(srgbRed: 0.62, green: 0.65, blue: 0.70, alpha: 1)
     private static let iconColor = NSColor(srgbRed: 0.93, green: 0.94, blue: 0.96, alpha: 1)
+    private let permanentHeart = FavoriteIndicator()
     private let favoriteIndicator = FavoriteIndicator()
+    #if SLIDESHOW_QA
+    private var lastLayoutTrace = ""
+    #endif
+    private var confirmationRevision: UUID?
+    private var holdingGlow = false
+    private var editingLayout: Bool { panel is LayoutEditor }
+    private var geometry: OverlayFrames { OverlayFrames(safe: safeRect, settings: settings) }
     private var indicatorTask: Task<Void, Never>?
     private var firstClickRevision: UUID?
     private var pressedRevision: UUID?
@@ -200,13 +211,16 @@ final class SlideshowView: NSView {
         }
         favoriteStatus.setAccessibilityElement(true)
         favoriteStatus.setAccessibilityRole(.button)
-        configureIcon(favoriteStatus, symbol: "star", name: "お気に入りに登録")
+        configureIcon(favoriteStatus, symbol: "heart", name: "お気に入りに登録")
         addSubview(bar)
         clock.isHidden = true
         addSubview(clock)
         fallingStar.wantsLayer = true
         fallingStar.isHidden = true
         addSubview(fallingStar)
+        bouncingHeart.wantsLayer = true
+        bouncingHeart.isHidden = true
+        addSubview(bouncingHeart)
         renderFavoriteStatus()
         notice.alignment = .center
         notice.textColor = .white
@@ -214,11 +228,14 @@ final class SlideshowView: NSView {
         notice.backgroundColor = NSColor.black.withAlphaComponent(0.9)
         notice.isHidden = true
         addSubview(notice)
+        permanentHeart.wantsLayer = true
+        permanentHeart.isHidden = true
+        addSubview(permanentHeart)
         favoriteIndicator.wantsLayer = true
         favoriteIndicator.isHidden = true
         addSubview(favoriteIndicator)
         updateControls(paused: false, ready: false)
-        showBar()
+        bar.isHidden = true
     }
 
     required init?(coder: NSCoder) { nil }
@@ -243,10 +260,16 @@ final class SlideshowView: NSView {
     }
 
     func applyPreferences(_ value: PlaybackPreferences) {
-        let changesArea = settings.barEdge != value.barEdge || settings.reserveBarSpace != value.reserveBarSpace
+        let oldArea = pictureArea
+        let clockChanged = settings.clockStyle != value.clockStyle || settings.clockVisible != value.clockVisible
+        let visible = value.clockVisible || editingLayout
+        let visibilityChanged = clock.isHidden == visible
         settings = value
-        clock.configure(style: value.clockStyle, visible: value.clockVisible)
-        if changesArea { resetZoom() }
+        if clockChanged || visibilityChanged {
+            clock.configure(style: value.clockStyle, visible: visible)
+        }
+        refreshPermanentHeart()
+        if oldArea != pictureArea { resetZoom() }
         needsLayout = true
         needsDisplay = true
     }
@@ -261,10 +284,10 @@ final class SlideshowView: NSView {
         self.loading = loading
         self.message = message
         self.powerWarning = powerWarning
-        let force = loading || message != nil
+        let force = message != nil
         if force != forceControls {
             forceControls = force
-            showBar()
+            refreshBar()
         }
         needsDisplay = true
     }
@@ -278,11 +301,11 @@ final class SlideshowView: NSView {
     override func layout() {
         super.layout()
         let safe = safeRect
-        let scale = toolbarScale
-        let width = 828 * scale
-        let height = 90 * scale
-        let barY = settings.barEdge == .top ? safe.maxY - 56 * scale - height : safe.minY + 56 * scale
-        bar.frame = CGRect(x: safe.midX - width / 2, y: barY, width: width, height: height)
+        let frames = geometry.overlays(editing: editingLayout)
+        bar.frame = frames[.bar] ?? .zero
+        let width = bar.frame.width
+        let height = bar.frame.height
+        let scale = width / 828
         bar.layer?.cornerRadius = 20 * scale
         let icons = [previousButton, pauseButton, nextButton, listButton, favoriteStatus, settingsButton, returnButton]
         for (item, center) in zip(icons, [48.0, 130.0, 213.0, 309.0, 460.0, 610.0, 761.0]) {
@@ -303,24 +326,33 @@ final class SlideshowView: NSView {
             renderFavoriteStatus()
         }
         notice.frame = CGRect(x: safe.midX - width / 2, y: safe.maxY - 58, width: width, height: 38)
-        let clockSize = settings.clockStyle == .digital ? CGSize(width: 156, height: 62) : CGSize(width: 84, height: 84)
-        let clockX = settings.clockSide == .left ? safe.minX + 24 : safe.maxX - clockSize.width - 24
-        var clockRect = CGRect(x: clockX, y: safe.maxY - clockSize.height - 24,
-                               width: clockSize.width, height: clockSize.height)
-        if clockRect.intersects(bar.frame.insetBy(dx: -10, dy: -10)) {
-            clockRect.origin.y = bar.frame.minY - clockRect.height - 12
-        }
-        clock.frame = clockRect
-        var indicator = CGRect(x: safe.maxX - 88, y: safe.maxY - 88, width: 64, height: 64)
-        for obstacle in [bar.frame, clock.isHidden ? CGRect.null : clockRect] {
-            if indicator.intersects(obstacle.insetBy(dx: -10, dy: -10)) {
-                indicator.origin.y = obstacle.minY - indicator.height - 12
-            }
-        }
+        clock.frame = frames[.clock] ?? .zero
+        clock.needsDisplay = true
+        let indicator = frames[.heart] ?? .zero
+        permanentHeart.frame = indicator
         favoriteIndicator.frame = indicator
-        if let panel {
+        permanentHeart.needsDisplay = true
+        favoriteIndicator.needsDisplay = true
+        #if SLIDESHOW_QA
+        func coordinates(_ frame: CGRect) -> String {
+            [frame.minX, bounds.height - frame.maxY, frame.width, frame.height].map { String(format: "%.2f", $0) }
+                .joined(separator: ",")
+        }
+        let encoded = [editingLayout ? "edit" : "play", clock.isHidden ? "off" : "on",
+                       coordinates(clock.frame), coordinates(indicator), coordinates(bar.frame), coordinates(pictureArea)]
+            .joined(separator: " ")
+        if encoded != lastLayoutTrace {
+            lastLayoutTrace = encoded
+            qaTrace("overlays " + encoded)
+        }
+        #endif
+        refreshBar()
+        if let editor = panel as? LayoutEditor {
+            editor.frame = bounds
+            editor.safe = safe
+        } else if let panel {
             let size = panel is PreferencesPanel ? CGSize(width: 730, height: min(705, safe.height - 32)) :
-                CGSize(width: 660, height: min(620, safe.height - 2 * (162 * scale)))
+                CGSize(width: 660, height: max(1, min(620, safe.height - 70)))
             let width = min(size.width, safe.width - 30)
             panel.frame = CGRect(x: safe.midX - width / 2, y: safe.midY - size.height / 2,
                                  width: width, height: size.height)
@@ -337,9 +369,9 @@ final class SlideshowView: NSView {
         tracking = area
     }
 
-    override func mouseMoved(with event: NSEvent) { showBar() }
-    override func mouseEntered(with event: NSEvent) { showBar() }
-    override func mouseExited(with event: NSEvent) { showBar() }
+    override func mouseMoved(with event: NSEvent) { refreshBar(at: convert(event.locationInWindow, from: nil)) }
+    override func mouseEntered(with event: NSEvent) { refreshBar() }
+    override func mouseExited(with event: NSEvent) { refreshBar() }
 
     func handlePhotoClick(_ event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
@@ -363,15 +395,15 @@ final class SlideshowView: NSView {
         }
     }
 
-    func zoom(for event: NSEvent, delta: CGFloat) {
+    func zoom(for event: NSEvent, delta: CGFloat) -> Bool {
         firstClickRevision = nil
         defer { pressedRevision = nil }
         // Once zooming, the button remains held even though this click cannot become a favorite gesture.
-        guard delta.isFinite, delta != 0, displayedRevision?() != nil, let photo else { return }
+        guard delta.isFinite, delta != 0, displayedRevision?() != nil, let photo else { return false }
         let oldRect = imageRect(for: photo.image.size)
         let point = convert(event.locationInWindow, from: nil)
         let next = min(8, max(1, zoomScale * exp(-max(-5, min(5, delta)) * 0.13)))
-        guard next != zoomScale else { return }
+        guard next != zoomScale else { return false }
         let ratio = next / zoomScale
         zoomScale = next
         let area = pictureArea
@@ -385,6 +417,7 @@ final class SlideshowView: NSView {
             x: min(limitX, max(-limitX, center.x - area.midX)),
             y: min(limitY, max(-limitY, center.y - area.midY)))
         needsDisplay = true
+        return true
     }
 
     private func symbolImage(_ symbol: String) -> NSImage? {
@@ -406,17 +439,26 @@ final class SlideshowView: NSView {
     func setFavoriteStatus(_ favorite: Bool, revision: UUID?) {
         guard photoIsFavorite != favorite || favoriteRevision != revision else { return }
         photoIsFavorite = favorite
+        if revision != favoriteRevision, confirmationRevision != nil {
+            indicatorTask?.cancel()
+            favoriteIndicator.layer?.removeAllAnimations()
+            favoriteIndicator.isHidden = true
+            confirmationRevision = nil
+            holdingGlow = false
+        }
         favoriteRevision = revision
         renderFavoriteStatus()
+        refreshPermanentHeart()
     }
 
     private func renderFavoriteStatus() {
-        favoriteStatus.image = symbolImage(photoIsFavorite ? "star.fill" : "star")
-        favoriteStatus.contentTintColor = photoIsFavorite ? Self.gold : Self.outline
+        favoriteStatus.image = symbolImage(photoIsFavorite && !editingLayout ? "heart.fill" : "heart")
+        favoriteStatus.contentTintColor = photoIsFavorite && !editingLayout ? Self.pink : Self.outline
         let label = photoIsFavorite ? "お気に入り登録済み" : "お気に入りに登録"
         favoriteStatus.setAccessibilityLabel(label)
         favoriteStatus.toolTip = label
-        favoriteStatus.isHidden = fallingRevision != nil && favoriteRevision == fallingRevision
+        favoriteStatus.isHidden = favoriteRevision != nil &&
+            (favoriteRevision == fallingRevision || favoriteRevision == bouncingRevision)
     }
 
     func showFavoriteRemoval(fallFrom revision: UUID?) {
@@ -425,11 +467,10 @@ final class SlideshowView: NSView {
         fallTask?.cancel()
         fallingStar.layer?.removeAllAnimations()
         layoutSubtreeIfNeeded()
-        showBar()
         fallingRevision = revision
         renderFavoriteStatus()
-        fallingStar.image = symbolImage("star.fill")
-        fallingStar.contentTintColor = Self.gold
+        fallingStar.image = symbolImage("heart.fill")
+        fallingStar.contentTintColor = Self.pink
         fallingStar.frame = convert(favoriteStatus.frame, from: bar)
         fallingStar.isHidden = false
         let origin = fallingStar.frame
@@ -463,7 +504,25 @@ final class SlideshowView: NSView {
         }
     }
 
-    func showFavoriteConfirmation(removed: Bool = false) {
+    private func refreshPermanentHeart() {
+        #if SLIDESHOW_QA
+        let wasHidden = permanentHeart.isHidden
+        #endif
+        permanentHeart.filled = !editingLayout
+        permanentHeart.sample = editingLayout
+        permanentHeart.isHidden = !editingLayout &&
+            !(photoIsFavorite && favoriteRevision != nil &&
+              !holdingGlow)
+        #if SLIDESHOW_QA
+        if permanentHeart.isHidden != wasHidden { qaTrace("permanent heart " + (permanentHeart.isHidden ? "off" : "on")) }
+        #endif
+        permanentHeart.needsDisplay = true
+    }
+
+    func showFavoriteConfirmation(removed: Bool = false, revision: UUID? = nil) {
+        confirmationRevision = revision
+        holdingGlow = !removed
+        if !removed && !bar.isHidden && (revision == nil || revision == favoriteRevision) { bounceFavorite() }
         favoriteIndicator.removed = removed
         favoriteIndicator.needsDisplay = true
         #if SLIDESHOW_QA
@@ -473,46 +532,113 @@ final class SlideshowView: NSView {
         favoriteIndicator.layer?.removeAllAnimations()
         favoriteIndicator.isHidden = false
         favoriteIndicator.alphaValue = 1
+        refreshPermanentHeart()
         #if SLIDESHOW_QA
         qaTrace("favorite indicator shown")
         #endif
         indicatorTask = Task { [weak self] in
             do { try await Task.sleep(for: .milliseconds(600)) } catch { return }
             guard let self else { return }
+            holdingGlow = false
+            refreshPermanentHeart()
             await NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.45
                 favoriteIndicator.animator().alphaValue = 0
             }
             guard !Task.isCancelled else { return }
             favoriteIndicator.isHidden = true
+            confirmationRevision = nil
+            refreshPermanentHeart()
             #if SLIDESHOW_QA
             qaTrace("favorite indicator hidden")
             #endif
         }
     }
 
-    func showBar() {
-        bar.isHidden = false
-        hideTask?.cancel()
-        hideTask = Task { [weak self] in
-            do { try await Task.sleep(for: .seconds(3)) } catch { return }
-            guard let self, panel == nil, !forceControls else { return }
-            if let window, bar.frame.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil)) {
-                showBar()
-            } else {
-                bar.isHidden = true
+    private func bounceFavorite() {
+        guard let revision = favoriteRevision else { return }
+        layoutSubtreeIfNeeded()
+        bounceTask?.cancel()
+        bouncingHeart.layer?.removeAllAnimations()
+        bouncingRevision = revision
+        renderFavoriteStatus()
+        bouncingHeart.frame = convert(favoriteStatus.frame, from: bar)
+        bouncingHeart.image = symbolImage("heart.fill")
+        bouncingHeart.contentTintColor = Self.pink
+        bouncingHeart.isHidden = false
+        let offset: CGFloat = (bar.frame.midY > safeRect.midY ? -42 : 42) * bar.frame.width / 828
+        let origin = bouncingHeart.frame
+        let target = origin.insetBy(dx: -3, dy: -3).offsetBy(dx: 0, dy: offset)
+        #if SLIDESHOW_QA
+        qaTrace("favorite bounce")
+        #endif
+        bounceTask = Task { [weak self] in
+            guard let self, !Task.isCancelled else { return }
+            await NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.16
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                bouncingHeart.animator().frame = target
+            }
+            guard !Task.isCancelled else { return }
+            await NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.30
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                bouncingHeart.animator().frame = origin
+            }
+            guard !Task.isCancelled else { return }
+            bouncingRevision = nil
+            bouncingHeart.isHidden = true
+            renderFavoriteStatus()
+        }
+    }
+
+    private func refreshBar(at point: CGPoint? = nil) {
+        guard let window else { return }
+        let location = point ?? convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        let near = bounds.contains(location) && bar.frame.insetBy(dx: -max(8, bar.frame.width / 828 * 22),
+                                                               dy: -max(8, bar.frame.width / 828 * 22)).contains(location)
+        if near || panel != nil || forceControls {
+            hideTask?.cancel()
+            hideTask = nil
+            bar.isHidden = false
+        } else if !bar.isHidden && hideTask == nil {
+            hideTask = Task { [weak self] in
+                guard let delay = self?.settings.barHideSeconds else { return }
+                do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+                guard let self else { return }
+                hideTask = nil
+                if panel == nil, !forceControls {
+                    bar.isHidden = true
+                    refreshBar()
+                }
             }
         }
     }
 
     func installPanel(_ next: NSView?) {
+        if next is LayoutEditor {
+            indicatorTask?.cancel()
+            fallTask?.cancel()
+            bounceTask?.cancel()
+            for effect in [favoriteIndicator, fallingStar, bouncingHeart] {
+                effect.layer?.removeAllAnimations()
+                effect.isHidden = true
+            }
+            confirmationRevision = nil
+            holdingGlow = false
+            fallingRevision = nil
+            bouncingRevision = nil
+        }
         panel?.removeFromSuperview()
         panel = next
         firstClickRevision = nil
         if let next { addSubview(next) }
+        clock.configure(style: settings.clockStyle, visible: settings.clockVisible || editingLayout)
+        renderFavoriteStatus()
+        refreshPermanentHeart()
         needsLayout = true
         needsDisplay = true
-        showBar()
+        refreshBar()
     }
 
     func flash(_ message: String) {
@@ -534,16 +660,9 @@ final class SlideshowView: NSView {
         for button in [previousButton, pauseButton, nextButton, listButton] { button.isEnabled = ready }
     }
 
-    private var toolbarScale: CGFloat {
-        min(1, safeRect.width / 1050, safeRect.height / 600)
-    }
-
     private var pictureArea: CGRect {
-        let safe = safeRect
-        guard settings.reserveBarSpace else { return safe }
-        let margin = min(safe.height - 1, 168 * toolbarScale)
-        return CGRect(x: safe.minX, y: safe.minY + (settings.barEdge == .bottom ? margin : 0), width: safe.width,
-                      height: max(1, safe.height - margin))
+        let size = photo?.image.size ?? CGSize(width: 16, height: 9)
+        return geometry.pictureArea(aspect: size.width / max(1, size.height))
     }
 
     private func imageRect(for size: CGSize) -> CGRect {
@@ -614,20 +733,28 @@ private final class PassiveImageView: NSImageView {
 
 private final class FavoriteIndicator: NSView {
     var removed = false
+    var filled = false
+    var sample = false
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     override func draw(_ dirtyRect: NSRect) {
+        let scale = bounds.width / 64
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        let transform = AffineTransform(scaleByX: scale, byY: scale)
+        (transform as NSAffineTransform).concat()
+        let bounds = CGRect(x: 0, y: 0, width: 64, height: 64)
         NSColor.black.withAlphaComponent(0.76).setFill()
         NSBezierPath(roundedRect: bounds, xRadius: 18, yRadius: 18).fill()
-        let glyph = NSAttributedString(string: "☆", attributes: [
+        let glyph = NSAttributedString(string: filled ? "♥" : "♡", attributes: [
             .font: NSFont.systemFont(ofSize: 43, weight: .semibold),
-            .foregroundColor: NSColor.white
+            .foregroundColor: filled ? NSColor(srgbRed: 1, green: 0.36, blue: 0.62, alpha: 1) : NSColor.white
         ])
         let point = CGPoint(x: bounds.midX - glyph.size().width / 2, y: bounds.midY - glyph.size().height / 2)
-        if !removed {
+        if !removed && !filled && !sample {
             NSGraphicsContext.saveGraphicsState()
             let glow = NSShadow()
-            glow.shadowColor = NSColor(srgbRed: 1, green: 0.77, blue: 0.36, alpha: 0.98)
+            glow.shadowColor = NSColor(srgbRed: 1, green: 0.44, blue: 0.69, alpha: 0.98)
             glow.shadowBlurRadius = 13
             glow.shadowOffset = .zero
             glow.set()

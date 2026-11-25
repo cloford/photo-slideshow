@@ -24,7 +24,7 @@ internal sealed class Slideshow : Form
     private readonly PlaybackSurface surface = new() { Dock = DockStyle.Fill };
     private readonly FlowLayoutPanel bar = new()
     {
-        AutoSize = true, WrapContents = false, FlowDirection = FlowDirection.LeftToRight,
+        AutoSize = false, WrapContents = false, FlowDirection = FlowDirection.LeftToRight,
         Padding = new Padding(10), BackColor = Color.FromArgb(27, 28, 31)
     };
     private readonly System.Windows.Forms.Timer nextTimer = new();
@@ -32,6 +32,8 @@ internal sealed class Slideshow : Form
     private readonly Button play;
     private readonly Button star;
     private readonly ToolTip tooltips = new();
+    private Font? toolbarFont;
+    private float toolbarFontScale;
     private string? folder;
     private PhotoFile[] files = [];
     private int shown = -1;
@@ -45,6 +47,7 @@ internal sealed class Slideshow : Form
     private bool loading;
     private DateTime barUntil;
     private DateTime starUntil;
+    private bool barWasRequired;
     private readonly SemaphoreSlim imageDecoders = new(2);
     private CancellationTokenSource? pendingRequest;
 
@@ -58,7 +61,7 @@ internal sealed class Slideshow : Form
         surface.Options = data.Settings;
         surface.AddFavorite = ToggleFavorite;
         surface.MovePhoto = MovePhoto;
-        surface.Reveal = ShowBar;
+        surface.ZoomChanged = Schedule;
         surface.FrameDrawn = drawn =>
         {
             if (drawn == revision && shown >= 0 && folder is not null)
@@ -67,18 +70,19 @@ internal sealed class Slideshow : Form
         Controls.Add(surface);
         Controls.Add(bar);
         bar.BringToFront();
+        bar.Visible = false;
         AddButton("❮", "前へ", () => MovePhoto(-1));
         play = AddButton("Ⅱ", "一時停止／再開", TogglePause);
         AddButton("❯", "次へ", () => MovePhoto(1));
         AddButton("▦", "写真一覧", OpenList);
-        star = AddButton("☆", "お気に入りに登録", () => { if (surface.DrawnRevision == revision) SetFavorite(shown, true); });
+        star = AddButton("♡", "お気に入りに登録", () => { if (surface.DrawnRevision == revision) SetFavorite(shown, true); });
         AddButton("⚙", "設定", Configure);
         AddButton("↶", "元の画面に戻る", Close);
         nextTimer.Tick += (_, _) => { nextTimer.Stop(); MovePhoto(1); };
         refresh.Tick += (_, _) =>
         {
-            bar.Visible = loading || shown < 0 || dialog || DateTime.UtcNow < barUntil || bar.ClientRectangle.Contains(bar.PointToClient(Cursor.Position));
-            if (data.Settings.ClockVisible || surface.EffectActive) surface.Invalidate();
+            UpdateBarVisibility();
+            if (surface.Options.ClockVisible || surface.EffectActive) surface.Invalidate();
             if (starUntil != default && DateTime.UtcNow >= starUntil)
             {
                 starUntil = default;
@@ -94,12 +98,13 @@ internal sealed class Slideshow : Form
         Shown += async (_, _) =>
         {
             refresh.Start();
-            ShowBar();
+            LayoutBar();
             if (!this.store.CanSave) surface.Status = "保存データを読み込めませんでした。";
             if (data.Folder is { } previous && await OpenFolder(previous)) return;
             await ChooseFolder();
         };
         Resize += (_, _) => LayoutBar();
+        surface.DpiChangedAfterParent += (_, _) => LayoutBar();
         FormClosed += (_, _) =>
         {
             shuttingDown = true;
@@ -108,6 +113,7 @@ internal sealed class Slideshow : Form
             nextTimer.Dispose();
             refresh.Dispose();
             tooltips.Dispose();
+            toolbarFont?.Dispose();
             SetPower(false);
             Save();
         };
@@ -118,7 +124,7 @@ internal sealed class Slideshow : Form
         var button = new Button
         {
             Text = icon, AccessibleName = name, Width = 64, Height = 45, ForeColor = Color.White,
-            Font = new Font("Segoe UI Symbol", 18), FlatStyle = FlatStyle.Flat, TabStop = true
+            FlatStyle = FlatStyle.Flat, TabStop = true
         };
         button.FlatAppearance.BorderSize = 0;
         button.Click += (_, _) => action();
@@ -129,12 +135,44 @@ internal sealed class Slideshow : Form
 
     private void LayoutBar()
     {
-        if (!IsHandleCreated) return;
-        var size = bar.PreferredSize;
-        bar.Location = new Point((ClientSize.Width - size.Width) / 2,
-            data.Settings.BarAtTop ? 20 : ClientSize.Height - size.Height - 20);
-        surface.BarBounds = new Rectangle(bar.Location, size);
+        if (!IsHandleCreated || star is null) return;
+        var screen = new RectangleF(0, 0, Math.Max(1, ClientSize.Width), Math.Max(1, ClientSize.Height));
+        var geometry = new OverlayFrames(screen, surface.Options, DeviceDpi / 96f);
+        bar.Bounds = Rectangle.Round(geometry.Frame(OverlayItem.Bar));
+        float scale = bar.Width / 510f;
+        bar.SuspendLayout();
+        bar.Padding = new Padding((int)Math.Round(10 * scale), 0, 0, 0);
+        if (toolbarFontScale != scale)
+        {
+            var previous = toolbarFont;
+            toolbarFont = new Font("Segoe UI Symbol", 24 * Math.Max(0.1f, scale), FontStyle.Regular, GraphicsUnit.Pixel);
+            foreach (Control button in bar.Controls) button.Font = toolbarFont;
+            previous?.Dispose();
+            toolbarFontScale = scale;
+        }
+        for (int index = 0; index < bar.Controls.Count; index++)
+        {
+            var button = bar.Controls[index];
+            int left = (int)Math.Round((10 + 70 * index) * scale);
+            int right = (int)Math.Round((10 + 70 * (index + 1)) * scale);
+            int height = (int)Math.Round(45 * scale);
+            button.Size = new Size(right - left, height);
+            button.Margin = new Padding(0, (bar.Height - height) / 2, 0, 0);
+        }
+        bar.ResumeLayout(true);
+        surface.BarBounds = bar.Bounds;
+        int heartIndex = bar.Controls.IndexOf(star);
+        surface.FavoriteOrigin = new PointF(bar.Left + (45 + heartIndex * 70) * scale,
+            bar.Top + bar.Height / 2f);
         surface.Invalidate();
+    }
+
+    protected override void WndProc(ref Message message)
+    {
+        const int displayChange = 0x007E;
+        base.WndProc(ref message);
+        if (message.Msg == displayChange && IsHandleCreated && !shuttingDown)
+            BeginInvoke(() => { if (!shuttingDown) Bounds = Screen.FromHandle(Handle).Bounds; });
     }
 
     protected override void OnMouseWheel(MouseEventArgs e)
@@ -143,11 +181,17 @@ internal sealed class Slideshow : Form
         base.OnMouseWheel(e);
     }
 
-    private void ShowBar()
+    private void UpdateBarVisibility()
     {
-        barUntil = DateTime.UtcNow.AddSeconds(3);
-        bar.Visible = true;
-        LayoutBar();
+        var nearby = surface.BarBounds;
+        int padding = Math.Max(8, (int)Math.Round(nearby.Width / 510f * 22));
+        nearby.Inflate(padding, padding);
+        var pointer = PointToClient(Cursor.Position);
+        bool required = dialog || (shown < 0 && !loading) || (ClientRectangle.Contains(pointer) && nearby.Contains(pointer));
+        var now = DateTime.UtcNow;
+        if (barWasRequired && !required) barUntil = now.AddSeconds(surface.Options.BarHideSeconds);
+        barWasRequired = required;
+        bar.Visible = required || now < barUntil;
     }
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
@@ -208,6 +252,7 @@ internal sealed class Slideshow : Form
         shown = -1;
         requested = -1;
         surface.SetPhoto(null, ++revision);
+        surface.IsFavorite = false;
         SetPower(true);
         data.LastByFolder.TryGetValue(fullPath, out string? prior);
         Request(FolderSource.StartIndex(files, prior, data.Settings.FromBeginning), 1, skip: true);
@@ -235,7 +280,6 @@ internal sealed class Slideshow : Form
         requested = index;
         loading = true;
         surface.Status = "写真を読み込み中…";
-        ShowBar();
 
         try
         {
@@ -304,7 +348,6 @@ internal sealed class Slideshow : Form
         paused = !paused;
         play.Text = paused ? "▶" : "Ⅱ";
         Schedule();
-        ShowBar();
     }
 
     private void Schedule()
@@ -328,8 +371,10 @@ internal sealed class Slideshow : Form
     private void UpdateStar()
     {
         bool favorite = IsFavorite(shown);
-        star.Text = starUntil > DateTime.UtcNow ? "" : favorite ? "★" : "☆";
-        star.ForeColor = favorite ? Color.Gold : Color.Silver;
+        surface.IsFavorite = favorite;
+        surface.Invalidate();
+        star.Text = starUntil > DateTime.UtcNow ? "" : favorite ? "♥" : "♡";
+        star.ForeColor = favorite ? Color.HotPink : Color.Silver;
     }
     private void ToggleFavorite(int expectedRevision)
     {
@@ -355,29 +400,51 @@ internal sealed class Slideshow : Form
             return false;
         }
         bool falling = !add && index == shown;
-        if (falling) starUntil = DateTime.UtcNow.AddSeconds(0.85);
+        bool bouncing = add && bar.Visible;
+        if (falling || bouncing) starUntil = DateTime.UtcNow.AddSeconds(falling ? 0.85 : 0.46);
         UpdateStar();
-        surface.ShowFavoriteEffect(!add, falling);
+        surface.ShowFavoriteEffect(!add, falling, bouncing);
         return true;
     }
 
     private void Configure()
     {
         using var settings = new SettingsDialog(data.Settings) { StartPosition = FormStartPosition.CenterParent };
-        if (ShowChild(settings) != DialogResult.OK) return;
-        if (settings.ChangeFolder) { _ = ChooseFolder(); return; }
-        var previous = data.Settings;
-        data.Settings = settings.Value;
-        if (!Save())
+        settings.Preview = preview =>
         {
+            surface.Options = preview;
+            LayoutBar();
+        };
+        settings.EditLayout = owner =>
+        {
+            using var editor = new LayoutEditor(owner.Value, Bounds, surface.CopyImage(), value =>
+            {
+                surface.Options = value;
+                LayoutBar();
+            });
+            editor.ShowDialog(owner);
+            owner.UpdateLayout(editor.Value);
+        };
+        settings.Persist = value =>
+        {
+            var previous = data.Settings;
+            data.Settings = value;
+            if (Save()) return true;
             data.Settings = previous;
-            surface.Status = "設定を保存できませんでした。";
-            return;
-        }
+            return false;
+        };
+        var result = ShowChild(settings);
         surface.Options = data.Settings;
         surface.ResetZoom();
         LayoutBar();
-        Schedule();
+        if (result == DialogResult.OK && settings.FolderPath is { } folderPath)
+            _ = OpenSelectedFolder(folderPath);
+    }
+
+    private async Task OpenSelectedFolder(string path)
+    {
+        if (!await OpenFolder(path))
+            MessageBox.Show(this, "画像が見つからないか、フォルダを読み込めませんでした。", Text);
     }
 
     private void OpenList()
