@@ -59,7 +59,7 @@ internal sealed class Slideshow : Form
         Text = "写真スライドショー";
         data = this.store.Read();
         surface.Options = data.Settings;
-        surface.AddFavorite = ToggleFavorite;
+        surface.AddFavorite = AddDisplayedFavorite;
         surface.MovePhoto = MovePhoto;
         surface.ZoomChanged = Schedule;
         surface.FrameDrawn = drawn =>
@@ -75,7 +75,10 @@ internal sealed class Slideshow : Form
         play = AddButton("Ⅱ", "一時停止／再開", TogglePause);
         AddButton("❯", "次へ", () => MovePhoto(1));
         AddButton("▦", "写真一覧", OpenList);
-        star = AddButton("♡", "お気に入りに登録", () => { if (surface.DrawnRevision == revision) SetFavorite(shown, true); });
+        star = AddButton("♡", "お気に入りに登録", () =>
+        {
+            if (!dialog && surface.DrawnRevision == revision) SetFavorite(shown, !IsFavorite(shown));
+        }, new FavoriteButton());
         AddButton("⚙", "設定", Configure);
         AddButton("↶", "元の画面に戻る", Close);
         nextTimer.Tick += (_, _) => { nextTimer.Stop(); MovePhoto(1); };
@@ -119,13 +122,15 @@ internal sealed class Slideshow : Form
         };
     }
 
-    private Button AddButton(string icon, string name, Action action)
+    private Button AddButton(string icon, string name, Action action, Button? control = null)
     {
-        var button = new Button
-        {
-            Text = icon, AccessibleName = name, Width = 64, Height = 45, ForeColor = Color.White,
-            FlatStyle = FlatStyle.Flat, TabStop = true
-        };
+        var button = control ?? new Button();
+        button.Text = icon;
+        button.AccessibleName = name;
+        button.Size = new Size(64, 45);
+        button.ForeColor = Color.White;
+        button.FlatStyle = FlatStyle.Flat;
+        button.TabStop = true;
         button.FlatAppearance.BorderSize = 0;
         button.Click += (_, _) => action();
         bar.Controls.Add(button);
@@ -375,10 +380,15 @@ internal sealed class Slideshow : Form
         surface.Invalidate();
         star.Text = starUntil > DateTime.UtcNow ? "" : favorite ? "♥" : "♡";
         star.ForeColor = favorite ? Color.HotPink : Color.Silver;
+        string label = favorite ? "お気に入りを解除" : "お気に入りに登録";
+        star.AccessibleName = label;
+        tooltips.SetToolTip(star, label);
     }
-    private void ToggleFavorite(int expectedRevision)
+    private void AddDisplayedFavorite(int expectedRevision)
     {
-        if (expectedRevision == revision) SetFavorite(shown, !IsFavorite(shown));
+        if (dialog || expectedRevision != revision) return;
+        if (IsFavorite(shown)) surface.PulseFavorite();
+        else SetFavorite(shown, true);
     }
     private bool SetFavorite(int index, bool add)
     {

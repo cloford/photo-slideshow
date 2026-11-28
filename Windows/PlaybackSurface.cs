@@ -17,6 +17,8 @@ internal sealed class PlaybackSurface : Control
     private double zoom = 1;
     private PointF offset;
     private long lastEffect = -1;
+    private long barEffectStarted = -1;
+    private bool subtle;
     private bool removed;
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     internal bool IsFavorite { get; set; }
@@ -56,7 +58,7 @@ internal sealed class PlaybackSurface : Control
     public int ImageHeight => image?.Height ?? 0;
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     internal string Status { set { status = value; Invalidate(); } }
-    public bool EffectActive => lastEffect >= 0;
+    public bool EffectActive => lastEffect >= 0 || barEffectStarted >= 0;
     internal OverlayFrames Geometry => new(new RectangleF(0, 0, Math.Max(1, Width), Math.Max(1, Height)),
         Options, DeviceDpi / 96f);
 
@@ -66,8 +68,18 @@ internal sealed class PlaybackSurface : Control
     {
         lastEffect = Stopwatch.GetTimestamp();
         removed = removal;
+        subtle = false;
         fall = falling;
         bounce = bouncing;
+        barEffectStarted = falling || bouncing ? lastEffect : -1;
+        Invalidate();
+    }
+
+    public void PulseFavorite()
+    {
+        lastEffect = Stopwatch.GetTimestamp();
+        removed = false;
+        subtle = true;
         Invalidate();
     }
 
@@ -77,6 +89,8 @@ internal sealed class PlaybackSurface : Control
         image = next;
         revision = generation;
         if (!removed) lastEffect = -1;
+        barEffectStarted = -1;
+        bounce = fall = false;
         old?.Dispose();
         ResetZoom();
     }
@@ -199,14 +213,26 @@ internal sealed class PlaybackSurface : Control
             TextRenderer.DrawText(e.Graphics, status, Font, areaText, Color.White,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
         }
-        double elapsed = EffectActive ? Stopwatch.GetElapsedTime(lastEffect).TotalSeconds : double.PositiveInfinity;
-        if (elapsed >= 1.25) lastEffect = -1;
-        if (Editing) DrawHeart(e.Graphics, "♡", Color.Silver, 255, false);
+        double elapsed = lastEffect >= 0 ? Stopwatch.GetElapsedTime(lastEffect).TotalSeconds : double.PositiveInfinity;
+        if (elapsed >= (subtle ? 0.36 : 1.25)) lastEffect = -1;
+        if (Editing) DrawHeart(e.Graphics, "♡", Color.Silver, 255);
         else
         {
-            if (image is not null && IsFavorite && (!EffectActive || removed || elapsed > 0.75))
-                DrawHeart(e.Graphics, "♥", Color.HotPink, 255, false);
-            if (EffectActive) DrawEffect(e.Graphics, elapsed);
+            if (image is not null && IsFavorite)
+            {
+                double glow = lastEffect < 0 || removed ? 0
+                    : subtle ? 0.60 * Math.Clamp((0.36 - elapsed) / 0.27, 0, 1)
+                    : Math.Clamp((1.05 - elapsed) / 0.45, 0, 1);
+                DrawHeart(e.Graphics, "♥", Color.HotPink, 255, glow);
+            }
+            if (lastEffect >= 0 && removed)
+                DrawHeart(e.Graphics, "♡", Color.White, (int)(255 * Math.Clamp((1.25 - elapsed) / 0.5, 0, 1)));
+            if (barEffectStarted >= 0)
+            {
+                double barElapsed = Stopwatch.GetElapsedTime(barEffectStarted).TotalSeconds;
+                if (barElapsed < (fall ? 0.85 : 0.46)) DrawBarEffect(e.Graphics, barElapsed);
+                else barEffectStarted = -1;
+            }
         }
         base.OnPaint(e);
     }
@@ -244,7 +270,7 @@ internal sealed class PlaybackSurface : Control
         graphics.Restore(state);
     }
 
-    private void DrawHeart(Graphics graphics, string glyph, Color color, int alpha, bool glow)
+    private void DrawHeart(Graphics graphics, string glyph, Color color, int alpha, double glow = 0)
     {
         var state = graphics.Save();
         graphics.TranslateTransform(indicatorRect.X, indicatorRect.Y);
@@ -252,9 +278,9 @@ internal sealed class PlaybackSurface : Control
         var area = new RectangleF(0, 0, 56, 56);
         using var shade = new SolidBrush(Color.FromArgb(alpha * 3 / 4, Color.Black));
         graphics.FillRoundedRectangle(shade, area, new SizeF(12, 12));
-        if (glow)
+        if (glow > 0)
         {
-            using var halo = new SolidBrush(Color.FromArgb(alpha / 3, Color.HotPink));
+            using var halo = new SolidBrush(Color.FromArgb((int)(100 * glow), Color.HotPink));
             for (int dx = -2; dx <= 2; dx++)
                 for (int dy = -2; dy <= 2; dy++)
                     Center(graphics, glyph, symbol, halo, new RectangleF(dx, dy, 56, 56));
@@ -271,10 +297,8 @@ internal sealed class PlaybackSurface : Control
         graphics.Restore(state);
     }
 
-    private void DrawEffect(Graphics graphics, double time)
+    private void DrawBarEffect(Graphics graphics, double time)
     {
-        int alpha = (int)(255 * Math.Clamp((1.25 - time) / 0.5, 0, 1));
-        DrawHeart(graphics, "♡", Color.White, alpha, !removed);
         if (bounce && time < 0.46)
         {
             var state = graphics.Save();

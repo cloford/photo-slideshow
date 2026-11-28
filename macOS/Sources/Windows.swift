@@ -163,7 +163,6 @@ final class SlideshowView: NSView {
     private var lastLayoutTrace = ""
     #endif
     private var confirmationRevision: UUID?
-    private var holdingGlow = false
     private var editingLayout: Bool { panel is LayoutEditor }
     private var geometry: OverlayFrames { OverlayFrames(safe: safeRect, settings: settings) }
     private var indicatorTask: Task<Void, Never>?
@@ -174,7 +173,7 @@ final class SlideshowView: NSView {
     private var settings = PlaybackPreferences()
     private let clock = ClockOverlay(frame: .zero)
     var displayedRevision: (() -> UUID?)?
-    var toggleFavorite: (() -> Void)?
+    var addFavorite: (() -> Void)?
     private let notice = NSTextField(wrappingLabelWithString: "")
     private var tracking: NSTrackingArea?
     private var hideTask: Task<Void, Never>?
@@ -209,6 +208,7 @@ final class SlideshowView: NSView {
                      settingsButton, returnButton, sectionDivider, returnDivider] {
             bar.addSubview(item)
         }
+        favoriteStatus.singleClickOnly = true
         favoriteStatus.setAccessibilityElement(true)
         favoriteStatus.setAccessibilityRole(.button)
         configureIcon(favoriteStatus, symbol: "heart", name: "お気に入りに登録")
@@ -390,7 +390,7 @@ final class SlideshowView: NSView {
         if event.clickCount == 1 {
             firstClickRevision = revision
         } else {
-            if event.clickCount == 2, firstClickRevision == revision { toggleFavorite?() }
+            if event.clickCount == 2, firstClickRevision == revision { addFavorite?() }
             firstClickRevision = nil
         }
     }
@@ -444,7 +444,6 @@ final class SlideshowView: NSView {
             favoriteIndicator.layer?.removeAllAnimations()
             favoriteIndicator.isHidden = true
             confirmationRevision = nil
-            holdingGlow = false
         }
         favoriteRevision = revision
         renderFavoriteStatus()
@@ -454,16 +453,21 @@ final class SlideshowView: NSView {
     private func renderFavoriteStatus() {
         favoriteStatus.image = symbolImage(photoIsFavorite && !editingLayout ? "heart.fill" : "heart")
         favoriteStatus.contentTintColor = photoIsFavorite && !editingLayout ? Self.pink : Self.outline
-        let label = photoIsFavorite ? "お気に入り登録済み" : "お気に入りに登録"
+        let label = photoIsFavorite ? "お気に入りを解除" : "お気に入りに登録"
         favoriteStatus.setAccessibilityLabel(label)
         favoriteStatus.toolTip = label
-        favoriteStatus.isHidden = favoriteRevision != nil &&
+        let animating = favoriteRevision != nil &&
             (favoriteRevision == fallingRevision || favoriteRevision == bouncingRevision)
+        if animating { favoriteStatus.image = nil }
     }
 
     func showFavoriteRemoval(fallFrom revision: UUID?) {
         showFavoriteConfirmation(removed: true)
         guard let revision else { return }
+        bounceTask?.cancel()
+        bouncingHeart.layer?.removeAllAnimations()
+        bouncingHeart.isHidden = true
+        bouncingRevision = nil
         fallTask?.cancel()
         fallingStar.layer?.removeAllAnimations()
         layoutSubtreeIfNeeded()
@@ -509,24 +513,27 @@ final class SlideshowView: NSView {
         let wasHidden = permanentHeart.isHidden
         #endif
         permanentHeart.filled = !editingLayout
-        permanentHeart.sample = editingLayout
-        permanentHeart.isHidden = !editingLayout &&
-            !(photoIsFavorite && favoriteRevision != nil &&
-              !holdingGlow)
+        permanentHeart.isHidden = !editingLayout && !(photoIsFavorite && favoriteRevision != nil)
         #if SLIDESHOW_QA
         if permanentHeart.isHidden != wasHidden { qaTrace("permanent heart " + (permanentHeart.isHidden ? "off" : "on")) }
         #endif
         permanentHeart.needsDisplay = true
     }
 
-    func showFavoriteConfirmation(removed: Bool = false, revision: UUID? = nil) {
+    func pulseFavorite(revision: UUID) {
+        showFavoriteConfirmation(revision: revision, subtle: true)
+    }
+
+    func showFavoriteConfirmation(removed: Bool = false, revision: UUID? = nil, subtle: Bool = false) {
         confirmationRevision = revision
-        holdingGlow = !removed
-        if !removed && !bar.isHidden && (revision == nil || revision == favoriteRevision) { bounceFavorite() }
+        if !removed && !subtle && !bar.isHidden { bounceFavorite() }
         favoriteIndicator.removed = removed
+        favoriteIndicator.filled = !removed
+        favoriteIndicator.glow = removed ? 0 : subtle ? 0.60 : 1
         favoriteIndicator.needsDisplay = true
         #if SLIDESHOW_QA
         if removed { qaTrace("favorite removal indicator shown") }
+        else { qaTrace(subtle ? "favorite existing pulse" : "favorite filled registration") }
         #endif
         indicatorTask?.cancel()
         favoriteIndicator.layer?.removeAllAnimations()
@@ -537,12 +544,11 @@ final class SlideshowView: NSView {
         qaTrace("favorite indicator shown")
         #endif
         indicatorTask = Task { [weak self] in
-            do { try await Task.sleep(for: .milliseconds(600)) } catch { return }
+            do { try await Task.sleep(for: .milliseconds(subtle ? 90 : 600)) } catch { return }
             guard let self else { return }
-            holdingGlow = false
             refreshPermanentHeart()
             await NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.45
+                context.duration = subtle ? 0.27 : 0.45
                 favoriteIndicator.animator().alphaValue = 0
             }
             guard !Task.isCancelled else { return }
@@ -558,6 +564,10 @@ final class SlideshowView: NSView {
     private func bounceFavorite() {
         guard let revision = favoriteRevision else { return }
         layoutSubtreeIfNeeded()
+        fallTask?.cancel()
+        fallingStar.layer?.removeAllAnimations()
+        fallingStar.isHidden = true
+        fallingRevision = nil
         bounceTask?.cancel()
         bouncingHeart.layer?.removeAllAnimations()
         bouncingRevision = revision
@@ -625,7 +635,6 @@ final class SlideshowView: NSView {
                 effect.isHidden = true
             }
             confirmationRevision = nil
-            holdingGlow = false
             fallingRevision = nil
             bouncingRevision = nil
         }
@@ -734,7 +743,7 @@ private final class PassiveImageView: NSImageView {
 private final class FavoriteIndicator: NSView {
     var removed = false
     var filled = false
-    var sample = false
+    var glow: CGFloat = 0
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -744,24 +753,27 @@ private final class FavoriteIndicator: NSView {
         let transform = AffineTransform(scaleByX: scale, byY: scale)
         (transform as NSAffineTransform).concat()
         let bounds = CGRect(x: 0, y: 0, width: 64, height: 64)
-        NSColor.black.withAlphaComponent(0.76).setFill()
-        NSBezierPath(roundedRect: bounds, xRadius: 18, yRadius: 18).fill()
+        if glow == 0 {
+            NSColor.black.withAlphaComponent(0.76).setFill()
+            NSBezierPath(roundedRect: bounds, xRadius: 18, yRadius: 18).fill()
+        }
         let glyph = NSAttributedString(string: filled ? "♥" : "♡", attributes: [
             .font: NSFont.systemFont(ofSize: 43, weight: .semibold),
             .foregroundColor: filled ? NSColor(srgbRed: 1, green: 0.36, blue: 0.62, alpha: 1) : NSColor.white
         ])
         let point = CGPoint(x: bounds.midX - glyph.size().width / 2, y: bounds.midY - glyph.size().height / 2)
-        if !removed && !filled && !sample {
+        if glow > 0 {
             NSGraphicsContext.saveGraphicsState()
-            let glow = NSShadow()
-            glow.shadowColor = NSColor(srgbRed: 1, green: 0.44, blue: 0.69, alpha: 0.98)
-            glow.shadowBlurRadius = 13
-            glow.shadowOffset = .zero
-            glow.set()
+            let shadow = NSShadow()
+            shadow.shadowColor = NSColor(srgbRed: 1, green: 0.44, blue: 0.69, alpha: glow)
+            shadow.shadowBlurRadius = 13
+            shadow.shadowOffset = .zero
+            shadow.set()
             glyph.draw(at: point)
             NSGraphicsContext.restoreGraphicsState()
+        } else {
+            glyph.draw(at: point)
         }
-        glyph.draw(at: point)
         if removed {
             let mark = NSAttributedString(string: "×", attributes: [
                 .font: NSFont.systemFont(ofSize: 23, weight: .bold),

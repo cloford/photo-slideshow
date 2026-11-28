@@ -349,7 +349,7 @@ final class SlideshowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         wireReturn(slideshow.returnButton, in: window)
         slideshow.favoriteStatus.perform = { [weak self] in
             guard let self, slideshowIsPlaying, let index = playback?.displayedIndex else { return }
-            changeFavorite(at: index, action: .add)
+            changeFavorite(at: index, action: .toggle)
         }
         window.contentView = slideshow
         window.acceptsMouseMovedEvents = true
@@ -359,9 +359,9 @@ final class SlideshowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         slideshow.listButton.perform = { [weak self] in self?.openPhotoList() }
         slideshow.settingsButton.perform = { [weak self] in self?.openPreferences() }
         slideshow.displayedRevision = { [weak self] in self?.playback?.displayedRevision }
-        slideshow.toggleFavorite = { [weak self] in
+        slideshow.addFavorite = { [weak self] in
             guard let self, let index = playback?.displayedIndex else { return }
-            changeFavorite(at: index, action: .toggle)
+            changeFavorite(at: index, action: .add)
         }
         window.handleWheel = { [weak self] event in self?.handleWheel(event) ?? false }
         window.handleLeftClick = { [weak slideshow] event in slideshow?.handlePhotoClick(event) }
@@ -613,9 +613,12 @@ final class SlideshowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard favoriteWrite == nil, let playback, playback.photos.indices.contains(index), let record else { return }
         let photo = playback.photos[index]
         let existing = favorites.firstIndex { $0.source == sourceKey && $0.photoID == photo.id }
-        if action == .add && existing != nil || action == .remove && existing == nil { return }
+        if action == .add, existing != nil {
+            if let revision = playback.displayedRevision { slideshow?.pulseFavorite(revision: revision) }
+            return
+        }
+        if action == .remove, existing == nil { return }
         let add = existing == nil
-        let clickedRevision = action == .toggle ? playback.displayedRevision : nil
         guard favoritesReadable else {
             slideshow?.flash("お気に入りを読み込めなかったため保存できません。")
             return
@@ -642,11 +645,11 @@ final class SlideshowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         let currentRevision = displayedPhotoID == photo.id ? self.playback?.displayedRevision : nil
                         if let currentRevision {
                             slideshow?.setFavoriteStatus(true, revision: currentRevision)
+                            slideshow?.showFavoriteConfirmation(revision: currentRevision)
                         }
-                        slideshow?.showFavoriteConfirmation(revision: currentRevision)
                     } else {
                         let currentRevision = displayedPhotoID == photo.id ? self.playback?.displayedRevision : nil
-                        slideshow?.showFavoriteRemoval(fallFrom: currentRevision ?? clickedRevision)
+                        slideshow?.showFavoriteRemoval(fallFrom: currentRevision)
                     }
                 }
             } else {

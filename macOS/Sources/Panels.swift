@@ -2,6 +2,7 @@ import AppKit
 
 final class ActionButton: NSButton {
     var perform: (() -> Void)?
+    var singleClickOnly = false
 
     init(_ title: String) {
         super.init(frame: .zero)
@@ -13,6 +14,10 @@ final class ActionButton: NSButton {
 
     required init?(coder: NSCoder) { nil }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseDown(with event: NSEvent) {
+        if !singleClickOnly || event.clickCount == 1 { super.mouseDown(with: event) }
+    }
+
     @objc private func pressed() { perform?() }
 }
 
